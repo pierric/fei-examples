@@ -55,3 +55,22 @@ Executable cifar10
                       , mxnet-dataiter
   default-extensions:   OverloadedLabels
                       , TypeFamilies
+
+Executable rcnn
+  main-is:             rcnn.hs
+  other-modules:       Model.VGG
+  hs-source-dirs:      src
+  ghc-options:          -Wall
+  default-language:     Haskell2010
+  build-depends:        base >= 4.7 && < 5.0
+                      , unordered-containers >= 0.2.8
+                      , vector >= 0.12
+                      , optparse-applicative
+                      , lens >= 4.12
+                      , mxnet-base
+                      , mxnet-ops
+                      , mxnet-nn >= 0.0.2 && < 0.0.3
+                      , mxnet-dataiter
+  default-extensions:   OverloadedLabels
+                      , TypeFamilies
+
