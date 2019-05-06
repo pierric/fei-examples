@@ -22,3 +22,14 @@ getFeature internalLayer layers filters withBatchNorm = do
         activation ("relu" ++ ident) (#data := sym .& #act_type := #relu .& Nil)
 
 
+getClassifier :: DType a => Symbol a -> Int -> IO (Symbol a)
+getClassifier input_data num_classes = do
+    sym <- flatten "flatten" (#data := unSymbol input_data .& Nil)
+    sym <- fullyConnected "fc6" (#data := sym .& #num_hidden := 4096 .& Nil)
+    sym <- activation "relu6" (#data := sym .& #act_type := #relu .& Nil)
+    sym <- dropout "drop6" (#data := sym .& #p := 0.5 .& Nil)
+    sym <- fullyConnected "fc7" (#data := sym .& #num_hidden := 4096 .& Nil)
+    sym <- activation "relu7" (#data := sym .& #act_type := #relu .& Nil)
+    sym <- dropout "drop7" (#data := sym .& #p := 0.5 .& Nil)
+    sym <- fullyConnected "fc8" (#data := sym .& #num_hidden := num_classes .& Nil)
+    return (Symbol sym)
