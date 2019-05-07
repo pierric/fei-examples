@@ -58,7 +58,8 @@ Executable cifar10
 
 Executable rcnn
   main-is:             rcnn.hs
-  other-modules:       Model.VGG
+  other-modules:       Model.VGG,
+                       Model.FasterRCNN
   hs-source-dirs:      src
   ghc-options:          -Wall
   default-language:     Haskell2010

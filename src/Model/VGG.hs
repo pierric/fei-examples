@@ -6,10 +6,9 @@ import Control.Monad (foldM)
 import MXNet.Base
 import MXNet.NN.Layer
 
-getFeature :: DType a => Symbol a -> [Int] -> [Int] -> Bool -> IO (Symbol a)
-getFeature internalLayer layers filters withBatchNorm = do
-    sym <- foldM build1 (unSymbol internalLayer) $ zip3 [1::Int ..] layers filters
-    return (Symbol sym)
+getFeature :: SymbolHandle -> [Int] -> [Int] -> Bool -> IO SymbolHandle
+getFeature internalLayer layers filters withBatchNorm =
+    foldM build1 internalLayer $ zip3 [1::Int ..] layers filters
   where
     build1 sym (idx, num, filter) = do 
         sym <- foldM (build2 idx) sym $ zip [1::Int ..] (replicate num filter)
@@ -22,9 +21,9 @@ getFeature internalLayer layers filters withBatchNorm = do
         activation ("relu" ++ ident) (#data := sym .& #act_type := #relu .& Nil)
 
 
-getClassifier :: DType a => Symbol a -> Int -> IO (Symbol a)
+getClassifier :: SymbolHandle -> Int -> IO SymbolHandle
 getClassifier input_data num_classes = do
-    sym <- flatten "flatten" (#data := unSymbol input_data .& Nil)
+    sym <- flatten "flatten" (#data := input_data .& Nil)
     sym <- fullyConnected "fc6" (#data := sym .& #num_hidden := 4096 .& Nil)
     sym <- activation "relu6" (#data := sym .& #act_type := #relu .& Nil)
     sym <- dropout "drop6" (#data := sym .& #p := 0.5 .& Nil)
@@ -32,4 +31,20 @@ getClassifier input_data num_classes = do
     sym <- activation "relu7" (#data := sym .& #act_type := #relu .& Nil)
     sym <- dropout "drop7" (#data := sym .& #p := 0.5 .& Nil)
     sym <- fullyConnected "fc8" (#data := sym .& #num_hidden := num_classes .& Nil)
+    return sym
+
+symbol :: Int -> Int -> Bool -> IO (Symbol Float)
+symbol num_classes num_layers withBatchNorm = do
+    sym <- variable "data"
+    sym <- getFeature sym layers filters withBatchNorm
+    sym <- getClassifier sym num_classes
+    sym <- softmaxoutput "softmax" (#data := sym .& Nil)
     return (Symbol sym)
+
+  where  
+    (layers, filters) = case num_layers of
+                            11 -> ([1, 1, 2, 2, 2], [64, 128, 256, 512, 512])
+                            13 -> ([2, 2, 2, 2, 2], [64, 128, 256, 512, 512])
+                            16 -> ([2, 2, 3, 3, 3], [64, 128, 256, 512, 512])
+                            19 -> ([2, 2, 4, 4, 4], [64, 128, 256, 512, 512])
+
