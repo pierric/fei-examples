@@ -12,7 +12,6 @@ import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Monad (forM_, void)
 import System.IO (hFlush, stdout)
-import qualified Numeric.LinearAlgebra as L
 
 type ArrayF = NDArray Float
 
@@ -56,6 +55,7 @@ instance CustomOperation (Operation SoftmaxProp) where
         --     result = L.fromRows $ zipWith upd rows (L.toList vec_lbl) :: L.Matrix Float
         -- copyFromVector (NDArray in_grad :: ArrayF) (L.flatten result)
 
+        out_shp@[_, num_classes] <- ndshape (NDArray out_data :: ArrayF)
         [label_onehot] <- A.one_hot (#indices := label .& #depth := num_classes .& Nil)
         [result] <- A.elemwise_sub (#lhs := out_data .& #rhs := label_onehot .& Nil)
         A._copyto_upd [in_grad] (#data := result .& Nil)
