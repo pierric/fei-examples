@@ -12,6 +12,7 @@ import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Monad (forM_, void)
 import System.IO (hFlush, stdout)
+import qualified Numeric.LinearAlgebra as L
 
 type ArrayF = NDArray Float
 
@@ -21,45 +22,43 @@ instance CustomOperationProp SoftmaxProp where
     prop_list_arguments _        = ["data", "label"]
     prop_list_outputs _          = ["output"]
     prop_list_auxiliary_states _ = []
-    prop_infer_shape _ in_shape =
-        let data_shape = head in_shape
-            label_shape = [head data_shape]
-            output_shape = data_shape
-        in ([data_shape, label_shape], [output_shape], [])
+    prop_infer_shape _ [data_shape, _] =
+        let output_shape = data_shape
+        in ([data_shape, [head data_shape]], [output_shape], [])
     prop_declare_backward_dependency _ grad_out data_in data_out = data_in ++ data_out
 
     data Operation SoftmaxProp = Softmax
     prop_create_operator _ _ _ = return Softmax
 
 instance CustomOperation (Operation SoftmaxProp) where
-    forward _ reqs in_data out_data aux is_train = do
-        print "Forward"
-        forM_ in_data $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
-        putStrLn "--"
-        forM_ out_data $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
+    forward _ [ReqWrite] [in_data,_] [out_data] aux is_train = do
+        -- let in_data_ = (NDArray in_data :: ArrayF)
+        -- [_, num_classes] <- ndshape in_data_
+        -- vec <- toVector in_data_
+        -- let batch_exp = L.toRows $ exp $ L.reshape num_classes vec :: [L.Vector Float]
+        --     norm1 = map (realToFrac . L.sumElements) $ batch_exp :: [L.Vector Float]
+        --     output = L.fromRows $ zipWith (/) batch_exp norm1
+        -- copyFromVector (NDArray out_data :: ArrayF) vec 
 
-    backward _ reqs out_grad in_data out_data in_grad aux = do
-        print "Backward"
-        forM_ out_grad $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
-        putStrLn "--"
-        forM_ in_data $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
-        putStrLn "--"
-        forM_ out_data $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
-        putStrLn "--"
-        forM_ in_grad $ \x -> do
-            sh <- ndshape (NDArray x)
-            print sh
-        putStrLn "--"
+        [result] <- A.softmax (#data := in_data .& #axis := 1 .& Nil)
+        A._copyto_upd [out_data] (#data := result .& Nil)
+
+    backward _ [ReqWrite] [_, label] [out_data] [in_grad, _] _ aux = do
+        -- let out_data_ = NDArray out_data :: ArrayF
+        --     label_    = NDArray label :: ArrayF
+        -- out_shp@[_, num_classes] <- ndshape out_data_
+        -- vec_lbl <- toVector label_
+        -- vec_out <- toVector out_data_
+        -- let rows = L.toRows $ L.reshape num_classes vec_out :: [L.Vector Float]
+        --     upd :: L.Vector Float -> Float -> L.Vector Float
+        --     upd row n = let n_ = floor n
+        --                 in row SV.// [(n_, row SV.! n_ - 1)]
+        --     result = L.fromRows $ zipWith upd rows (L.toList vec_lbl) :: L.Matrix Float
+        -- copyFromVector (NDArray in_grad :: ArrayF) (L.flatten result)
+
+        [label_onehot] <- A.one_hot (#indices := label .& #depth := num_classes .& Nil)
+        [result] <- A.elemwise_sub (#lhs := out_data .& #rhs := label_onehot .& Nil)
+        A._copyto_upd [in_grad] (#data := result .& Nil)
 
 
 symbol :: DType a => IO (Symbol a)
@@ -97,28 +96,6 @@ main = do
     registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- symbol
 
-    let inferShape :: DType a => Symbol a -> M.HashMap String (NDArray a) -> IO (M.HashMap String [Int], M.HashMap String [Int])
-        inferShape (Symbol sym) known = do
-            let (names, vals) = unzip $ M.toList known
-            shapes <- mapM ndshape vals
-            let arg_ind = scanl (+) 0 $ map length shapes
-                arg_shp = concat shapes
-            print (names, arg_ind, arg_shp)
-            (inp_shp, _, aux_shp, complete) <- mxSymbolInferShape sym names arg_ind arg_shp
-            -- if (not complete) then throwM InferredShapeInComplete else return ()
-            inps <- mxSymbolListArguments sym
-            auxs <- mxSymbolListAuxiliaryStates sym
-            return (M.fromList $ zip inps inp_shp, M.fromList $ zip auxs aux_shp)
-
-    dummyX <- makeEmptyNDArray [1,1,28,28] contextCPU
-    dummyY <- makeEmptyNDArray [1,1] contextCPU
-    let placeholders = M.fromList [("x", dummyX), ("y", dummyY)]
-    print "call infer"
-    (inp_with_shp, aux_with_shp) <- inferShape net placeholders
-    print (inp_with_shp, aux_with_shp)
-
-
-    print "init"
     sess <- NN.initialize net $ NN.Config {
                 NN._cfg_data = ("x", [1,28,28]),
                 NN._cfg_label = ("y", [1]),
@@ -127,8 +104,6 @@ main = do
                 NN._cfg_context = contextCPU
             }
     optimizer <- NN.makeOptimizer NN.SGD'Mom (NN.Const 0.0002) Nil
-
-    print "train"
 
     NN.train sess $ do
 
