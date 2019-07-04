@@ -1,4 +1,14 @@
 resolver: lts-12.16
+
+#setup-info:
+#  ghc:
+#    linux64-custom-dwarf-tinfo6:
+#      8.6.5:
+#        url: "https://downloads.haskell.org/~ghc/8.6.5/ghc-8.6.5-x86_64-deb9-linux-dwarf.tar.xz"
+#        #sha256: f9cac6e402c71d7251f2e22f412fb4abd72c64f34481a1e548cd7f6ff2352a07
+#ghc-variant: dwarf
+ghc-options:
+    "$everything": -threaded
 packages:
 - .
 extra-deps:
@@ -7,16 +17,15 @@ extra-deps:
 - ../mxnet-nn
 - ../mxnet-dataiter/dataiter
 - ../tuple-ops
-- git: https://github.com/kylcarte/type-combinators.git
-  commit: 071942730b6bb34990d37e1a25236382cf0dcbc6
+- git: https://github.com/0xCM/type-combinators.git
+  commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
   commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
 - c2hs-extra-0.1.0.1
 - streaming-utils-0.1.4.7
-- graphviz-2999.20.0.2
-- fgl-5.5.4.0
+- graphviz-2999.20.0.3
 extra-include-dirs:
-- /home/jiasen/dschungle/incubator-mxnet/include
-- /home/jiasen/dschungle/incubator-mxnet/nnvm/include/
+- /home/jiasen/dschungel/incubator-mxnet/include
+- /home/jiasen/dschungel/incubator-mxnet/3rdparty/tvm/nnvm/include/
 extra-lib-dirs:
-- /home/jiasen/dschungle/incubator-mxnet/lib
+- /home/jiasen/dschungel/incubator-mxnet/lib
