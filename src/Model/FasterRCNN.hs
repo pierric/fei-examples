@@ -201,17 +201,20 @@ sample_rois :: V.Vector (Repa.Array _ DIM1 Float) -> V.Vector (Repa.Array _ DIM1
                    V.Vector Float, 
                    Repa.Array _ Repa.DIM2 Float, 
                    Repa.Array _ Repa.DIM2 Float)
-sample_rois rois gt_boxes num_classes rois_per_image fg_rois_per_image fg_overlap box_stds = do
+sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_stds = do
     -- :param rois: [num_rois, 5] (batch_index, x1, y1, x2, y2)
-    -- :param gt_boxes: [num_rois, 5] (x1, y1, x2, y2, cls)
+    -- :param gt: [num_rois, 5] (x1, y1, x2, y2, cls)
     --
     -- :returns: sampled (rois, labels, regression, weight)
     let num_rois = V.length rois
-    assert (num_rois == V.length gt_boxes) (return ())
-    overlaps <- Repa.computeUnboxedP $ overlapMatrix rois gt_boxes
+    -- print(num_rois, V.length gt_boxes)
+    -- assert (num_rois == V.length gt_boxes) (return ())
+    overlaps <- let aoi_boxes = V.map (Repa.extract (Z:.1) (Z:.4)) rois
+                    gt_boxes  = V.map (Repa.extract (Z:.0) (Z:.4)) gt
+                in Repa.computeUnboxedP $ overlapMatrix aoi_boxes gt_boxes
 
     let maxIndices = argMax overlaps
-        gt_chosen  = V.map (gt_boxes %!) maxIndices
+        gt_chosen  = V.map (gt %!) maxIndices
 
     -- a uniform sampling w/o replacement from the fg boxes if there are too many
     fg_indexes <- let fg_indexes = V.filter (\(i, j) -> Repa.index overlaps (Z :. i :. j) >= fg_overlap) (V.indexed maxIndices)
@@ -244,7 +247,9 @@ sample_rois rois gt_boxes num_classes rois_per_image fg_rois_per_image fg_overla
     -- regression is indexed by class.
     bbox_target <- UVM.replicate (rois_per_image * 4 * num_classes) (0 :: Float)
     bbox_weight <- UVM.replicate (rois_per_image * 4 * num_classes) (0 :: Float)
-    forM_ [0..num_rois-1] $ \i -> do
+    
+    -- only assign regression and weights for the foreground boxes.
+    forM_ [0..length fg_indexes-1] $ \i -> do
         let lbl = floor (labels_keep %! i)
             (tgt0, tgt1, tgt2, tgt3) = targets %! i :: Box
         assert (lbl >= 0 && lbl < num_classes) (return ())
@@ -277,8 +282,8 @@ overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
     calcOvp (Z :. ind_rois :. ind_gt) =
         let b1 = rois %! ind_rois
             b2 = gt   %! ind_gt
-            iw = min (b1 #! 2) (b2 #! 2) - max (b1 #! 0) (b2 #! 0)
-            ih = min (b1 #! 3) (b2 #! 3) - max (b1 #! 1) (b2 #! 1)
+            iw = min (b1 #! 2) (b2 #! 2) - max (b1 #! 0) (b2 #! 0) + 1
+            ih = min (b1 #! 3) (b2 #! 3) - max (b1 #! 1) (b2 #! 1) + 1
             areaI = iw * ih
             areaU = area1 %! ind_rois + area2 %! ind_gt - areaI
         in if iw > 0 && ih > 0 then areaI / areaU else 0
@@ -315,3 +320,16 @@ bboxTransform [std0, std1, std2, std3] box1 box2 =
 
 vstack :: Repa.Source r Float => V.Vector (Repa.Array r Repa.DIM2 Float) -> Repa.Array Repa.D Repa.DIM2 Float
 vstack = Repa.transpose . V.foldl1 (Repa.++) . V.map Repa.transpose
+
+
+test_sample_rois = let
+        v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]
+        v2 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 2.2, 2.2, 4.5, 4.5]
+        v3 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 4.2, 1, 6.5, 2.8]
+        v4 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 6, 3, 7, 4]
+        rois = V.fromList $ map Repa.delay [v1, v2, v3, v4]
+        g1 = Repa.fromListUnboxed (Z:.5::DIM1) [1,1,2,2,1]
+        g2 = Repa.fromListUnboxed (Z:.5::DIM1) [2,3,3,4,1]
+        g3 = Repa.fromListUnboxed (Z:.5::DIM1) [4,1,6,3,2]
+        gt_boxes = V.fromList $ map Repa.delay [g1, g2, g3]
+      in sample_rois rois gt_boxes 3 6 2 0.5 [0.1, 0.1, 0.1, 0.1]
