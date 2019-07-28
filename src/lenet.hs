@@ -36,8 +36,8 @@ main = do
     _    <- mxListAllOpNames
     net  <- Model.symbol
     sess <- initialize net $ Config { 
-                _cfg_data = ("x", [1,28,28]),
-                _cfg_label = ("y", [1]),
+                _cfg_data = M.singleton "x" [1,28,28],
+                _cfg_label = M.singleton "y" [1],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_context = contextGPU0
@@ -46,18 +46,18 @@ main = do
 
     train sess $ do 
 
-        let trainingData = mnistIter (#image := "dataiter/test/data/train-images-idx3-ubyte" .&
-                                      #label := "dataiter/test/data/train-labels-idx1-ubyte" .& 
+        let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte" .&
+                                      #label := "data/train-labels-idx1-ubyte" .& 
                                       #batch_size := 128 .& Nil)
-        let testingData  = mnistIter (#image := "dataiter/test/data/t10k-images-idx3-ubyte" .&
-                                      #label := "dataiter/test/data/t10k-labels-idx1-ubyte" .&
+        let testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte" .&
+                                      #label := "data/t10k-labels-idx1-ubyte" .&
                                       #batch_size := 16  .& Nil)
 
         total1 <- sizeD trainingData
         liftIO $ putStrLn $ "[Train] "
         forM_ (range 1) $ \ind -> do
             liftIO $ putStrLn $ "iteration " ++ show ind
-            metric <- newMetric "train" CrossEntropy
+            metric <- newMetric "train" (CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- format metric

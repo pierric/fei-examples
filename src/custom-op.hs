@@ -97,8 +97,8 @@ main = do
     net  <- symbol
 
     sess <- NN.initialize net $ NN.Config {
-                NN._cfg_data = ("x", [1,28,28]),
-                NN._cfg_label = ("y", [1]),
+                NN._cfg_data = M.singleton "x" [1,28,28],
+                NN._cfg_label = M.singleton "y" [1],
                 NN._cfg_initializers = M.empty,
                 NN._cfg_default_initializer = default_initializer,
                 NN._cfg_context = contextCPU
@@ -118,7 +118,7 @@ main = do
         liftIO $ putStrLn $ "[Train] "
         forM_ (enumFromTo 1 1 :: [Int]) $ \ind -> do
             liftIO $ putStrLn $ "iteration " ++ show ind
-            metric <- NN.newMetric "train" NN.CrossEntropy
+            metric <- NN.newMetric "train" (NN.CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 NN.fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- NN.format metric

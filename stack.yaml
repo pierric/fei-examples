@@ -16,12 +16,14 @@ extra-deps:
 - ../mxnet-hs/operators
 - ../mxnet-nn
 - ../mxnet-dataiter/dataiter
+- ../mxnet-cocoapi
 - ../tuple-ops
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
   commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
 - c2hs-extra-0.1.0.1
+- JuicyPixels-repa-0.7.1.0
 - streaming-utils-0.1.4.7
 - graphviz-2999.20.0.3
 extra-include-dirs:

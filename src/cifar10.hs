@@ -54,8 +54,8 @@ main = do
               Resnet  -> Resnet.symbol 10 34 [3,32,32]
               Resnext -> Resnext.symbol
     sess <- initialize net $ Config { 
-                _cfg_data = ("x", [3,32,32]),
-                _cfg_label = ("y", [1]),
+                _cfg_data = M.singleton "x" [3,32,32],
+                _cfg_label = M.singleton "y" [1],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_context = contextGPU0
@@ -68,10 +68,13 @@ main = do
 
     train sess $ do 
 
-        let trainingData = imageRecordIter (#path_imgrec := "dataiter/test/data/cifar10_train.rec" .&
+        let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec" .&
                                             #data_shape  := [3,32,32] .&
                                             #batch_size  := 128 .& Nil)
-        let testingData  = imageRecordIter (#path_imgrec := "dataiter/test/data/cifar10_val.rec" .&
+        let testingData  = imageRecordIter (#path_imgrec := "data/cifar10_val.rec" .&
                                             #data_shape  := [3,32,32] .&
                                             #batch_size  := 32 .& Nil)
-        fitDataset optimizer trainingData testingData (CrossEntropy :+ Accuracy :+ MNil) 18
+        fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 18
+
+  where
+    bind ["x", "y"] (dat, lbl) = M.fromList [("x", dat), ("y", lbl)]

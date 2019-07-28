@@ -81,6 +81,8 @@ Executable rcnn
                       , unordered-containers >= 0.2.8
                       , vector >= 0.12
                       , optparse-applicative
+                      , attoparsec
+                      , text
                       , lens >= 4.12
                       , repa
                       , random-fu
@@ -88,6 +90,7 @@ Executable rcnn
                       , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3
                       , mxnet-dataiter
+                      , mxnet-cocoapi
   default-extensions:   OverloadedLabels
                       , TypeFamilies
 
