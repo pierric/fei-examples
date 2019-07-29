@@ -1,6 +1,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RecordWildCards #-}
 module Model.FasterRCNN where
 
 import qualified Data.Vector as V
@@ -24,11 +27,35 @@ import MXNet.Base.Operators.Symbol (
 import MXNet.NN.Layer
 import qualified Model.VGG as VGG
 
-symbolTrain :: [Float] -> [Float] -> Int -> Int -> Int -> Int -> Int -> Float -> Int -> Int -> [Int] -> IO (Symbol Float)
-symbolTrain anchor_scales anchor_ratios num_classes
-            rpn_feature_stride rpn_batch_rois rpn_pre_topk rpn_post_topk rpn_nms_thresh rpn_min_size
-            rcnn_feature_stride rcnn_pooled_size= do
-    let numAnchors = length anchor_scales * length anchor_ratios
+import Debug.Trace
+
+data RcnnConfiguration = RcnnConfiguration {
+    rpn_anchor_scales :: [Int],
+    rpn_anchor_ratios :: [Float],
+    rpn_feature_stride :: Int,
+    rpn_batch_rois :: Int,
+    rpn_pre_topk :: Int,
+    rpn_post_topk :: Int,
+    rpn_nms_thresh :: Float,
+    rpn_min_size :: Int,
+    rpn_fg_fraction :: Float,
+    rpn_fg_overlap :: Float,
+    rpn_bg_overlap :: Float,
+    rpn_allowd_border :: Int,
+    rcnn_num_classes   :: Int,
+    rcnn_feature_stride :: Int,
+    rcnn_pooled_size :: [Int],
+    rcnn_batch_rois  :: Int,
+    rcnn_batch_size  :: Int,
+    rcnn_fg_fraction :: Float,
+    rcnn_fg_overlap  :: Float,
+    rcnn_bbox_stds   :: [Float]
+} deriving Show
+
+symbolTrain :: RcnnConfiguration -> IO (Symbol Float)
+symbolTrain RcnnConfiguration{..} =  do
+    let numAnchors = length rpn_anchor_scales * length rpn_anchor_ratios
+    print ("symbolTrain", numAnchors)
     -- dat:
     dat <- variable "data"
     -- imInfo:
@@ -42,7 +69,8 @@ symbolTrain anchor_scales anchor_ratios num_classes
     -- rpnBoxWeight: (batch_size, 4 * numAnchors, feat_height, feat_width)
     rpnBoxWeight <- variable "bbox_weight"
 
-    convFeat <- VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False
+    -- VGG-15 without the last pooling layer
+    convFeat <- VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
 
     rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
     rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
@@ -69,11 +97,19 @@ symbolTrain anchor_scales anchor_ratios num_classes
     rpnClsAct <- softmax "rpn_cls_act" (#data := rpnClsScoreReshape .& #axis := 1 .& Nil)
     rpnClsActReshape <- reshape "rpn_cls_act_reshape" (#data := rpnClsAct .& #shape := [0, 2 * numAnchors, -1, 0] .& Nil)
     rois <- _contrib_MultiProposal "rois" (#cls_prob := rpnClsActReshape .& #bbox_pred := rpnBBoxPred .& #im_info := imInfo
-                                        .& #feature_stride := rpn_feature_stride .& #scales := anchor_scales .& #ratios := anchor_ratios
+                                        .& #feature_stride := rpn_feature_stride .& #scales := map fromIntegral rpn_anchor_scales .& #ratios := rpn_anchor_ratios
                                         .& #rpn_pre_nms_top_n := rpn_pre_topk .& #rpn_post_nms_top_n := rpn_post_topk
                                         .& #threshold := rpn_nms_thresh .& #rpn_min_size := rpn_min_size .& Nil)
 
-    proposal <- _Custom "proposal" (#data := [rois, gtBoxes] .& #op_type := "proposal_target" .& Nil)
+    proposal <- _Custom "proposal" (#data := [rois, gtBoxes] 
+                                 .& #op_type     := "proposal_target" 
+                                 .& #num_classes :≅ rcnn_num_classes
+                                 .& #batch_images:≅ rcnn_batch_size
+                                 .& #batch_rois  :≅ rcnn_batch_rois
+                                 .& #fg_fraction :≅ rcnn_fg_fraction
+                                 .& #fg_overlap  :≅ rcnn_fg_overlap
+                                 .& #box_stds    :≅ rcnn_bbox_stds
+                                 .& Nil)
     [rois, label, bboxTarget, bboxWeight] <- mapM (at proposal) [0..3]
 
     ---------------------------
@@ -83,13 +119,13 @@ symbolTrain anchor_scales anchor_ratios num_classes
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
     topFeat <- VGG.getTopFeature roiPool
-    clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := num_classes .& Nil)
+    clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
 
     ---------------------------
     -- bbox_loss part
     --
-    bboxPred <- fullyConnected "bbox_pred" (#data := topFeat .& #num_hidden := 4 * num_classes .& Nil)
+    bboxPred <- fullyConnected "bbox_pred" (#data := topFeat .& #num_hidden := 4 * rcnn_num_classes .& Nil)
     bboxPredReg <- elemwise_sub "bbox_pred_reg" (#lhs := bboxPred .& #rhs := bboxTarget .& Nil)
     bboxPredRegSmooth <- smooth_l1 "bbox_pred_reg_smooth" (#data := bboxPredReg .& #scalar := 1.0 .& Nil)
     bboxLoss_ <- elemwise_mul "bbox_loss_" (#lhs := bboxPredRegSmooth .& #rhs := bboxWeight .& Nil)
@@ -125,18 +161,20 @@ instance CustomOperationProp ProposalTargetProp where
         in ([rpn_rois_shape, gt_boxes_shape],
             [output_rois_shape, label_shape, bbox_target_shape, bbox_weight_shape],
             [])
+    prop_declare_backward_dependency prop grad_out data_in data_out = []
 
     data Operation ProposalTargetProp = ProposalTarget ProposalTargetProp
     prop_create_operator prop _ _ = return (ProposalTarget prop)
 
 instance CustomOperation (Operation ProposalTargetProp) where
-    forward (ProposalTarget prop) [ReqWrite] inputs outputs aux is_train = do
+    forward (ProposalTarget prop) [ReqWrite, ReqWrite, ReqWrite, ReqWrite] inputs outputs aux is_train = do
         -- :param: rois, shape of (N*nms_top_n, 5), [image_index_in_batch, bbox0, bbox1, bbox2, bbox3]
         -- :param: gt_boxes, shape of (N, M, 5), M varies per image. [bbox0, bbox1, bbox2, bbox3, class]
         let [rois, gt_boxes] = inputs
             [rois_output, label_output, bbox_target_output, bbox_weight_output] = outputs
             batch_size = prop ^. batch_images
 
+        -- convert NDArray to Vector of Repa array.
         r_rois   <- arrayToRepa rois     >>= return . toRows2
         r_gt     <- arrayToRepa gt_boxes >>= return . toRows3
 
@@ -161,7 +199,8 @@ instance CustomOperation (Operation ProposalTargetProp) where
         arrayToRepa :: Repa.Shape sh => NDArrayHandle -> IO (Repa.Array Repa.U sh Float)
         arrayToRepa hdl = do
             let arr = NDArray hdl
-            shape <- shapeOfList <$> ndshape arr
+            -- the Repa needs a reversed representation of shape
+            shape <- shapeOfList . reverse <$> ndshape arr
             vec   <- toVector arr
             return $ Repa.fromUnboxed shape $ UV.convert vec
         
@@ -191,7 +230,7 @@ instance CustomOperation (Operation ProposalTargetProp) where
             sample_rois rois_this_image' gt_this_image 
                 (prop ^. num_classes) num_rois_per_image fg_rois_per_image (prop ^. fg_overlap) (prop ^. box_stds)
 
-    backward _ [ReqWrite] _ _ [in_grad_0, in_grad_1] _ _ = do
+    backward _ [ReqWrite, ReqWrite] _ _ [in_grad_0, in_grad_1] _ _ = do
         _set_value_upd [in_grad_0] (#src := 0 .& Nil)
         _set_value_upd [in_grad_1] (#src := 0 .& Nil)
 
