@@ -60,7 +60,8 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "rcnn-batch-size"   <> metavar "BATCH-SIZE"     <> showDefault <> value 1         <> help "rcnn batch size")
                     <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"    <> showDefault <> value 0.25      <> help "rcnn foreground fraction")
                     <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"     <> showDefault <> value 0.5       <> help "rcnn foreground iou threshold")
-                    <*> option floatList (long "rcnn-bbox-stds"    <> metavar "BBOX-STDDEV"    <> showDefault <> value [0.1, 0.1, 0.2, 0.2] <> help "standard deviation of bbox"))                    
+                    <*> option floatList (long "rcnn-bbox-stds"    <> metavar "BBOX-STDDEV"    <> showDefault <> value [0.1, 0.1, 0.2, 0.2] <> help "standard deviation of bbox")
+                    <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model"))
                 (CocoConfig
                     <$> strOption        (long "coco" <> metavar "PATH" <> help "path to the coco dataset")
                     <*> option auto      (long "img-short-side"    <> metavar "SIZE" <> showDefault <> value 600  <> help "short side of image")
@@ -95,6 +96,12 @@ main = do
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
     sym  <- symbolTrain rcnn_conf
+
+    res  <- inferShape sym [
+                ("data",        [1,3, 600, 1000]),
+                ("im_info",     [1, 3]),
+                ("gt_boxes",    [1, 0, 5]) ]
+    print res
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     let extr_feature_shape (w, h) = do
@@ -143,11 +150,12 @@ main = do
                                              , ("label",       y0)
                                              , ("bbox_target", y1)
                                              , ("bbox_weight", y2) ]
-                    metric <- newMetric "train" MNil
+                    metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
                     fitAndEval optimizer binding metric
+                    eval <- format metric
                     liftIO $ do
-                        putStr $ "\r\ESC[K" ++ show i ++ "/" ++ show 10000
-                        hFlush stdout
+                       putStr $ "\r\ESC[K" ++ show i ++ " " ++ eval
+                       hFlush stdout
                 liftIO $ putStrLn ""
 
     mxNotifyShutdown
@@ -159,7 +167,7 @@ main0 = do
     sym  <- symbolTrain rcnn_conf
     isym <- internals sym
     fsym <- at' isym "rpn_cls_prob_output"
-    res  <- inferShape fsym [("data", [1,3,coco_img_long_side, coco_img_short_side])]
+    res  <- inferShape sym [("data", [1,3,coco_img_long_side, coco_img_short_side])]
     print res
     -- let arg_ind = scanl (+) 0 $ map length shapes
     --     arg_shp = concat shapes
@@ -173,7 +181,7 @@ main0 = do
 main1 = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
-    let conf = RcnnConfiguration [1,2,4]  [0.5,1,2]  16  1  12000  1000  0.8  10  0.7  0.5  0.2  1  6  16  [14, 14] 128 1 0.25 0.5 [0.1, 0.1, 0.2, 0.2]
+    let conf = RcnnConfiguration [1,2,4]  [0.5,1,2]  16  1  12000  1000  0.8  10  0.7  0.5  0.2  1  6  16  [14, 14] 128 1 0.25 0.5 [0.1, 0.1, 0.2, 0.2] ""
     sym  <- symbolTrain conf
     res  <- inferShape sym [
                 ("data",        [1,3, 600, 1000]),
