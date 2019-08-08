@@ -2,6 +2,7 @@ module Model.VGG where
 
 import Text.Printf (printf)
 import Control.Monad (foldM)
+import Data.Maybe (fromMaybe)
 
 import MXNet.Base
 import MXNet.NN.Layer
@@ -31,26 +32,28 @@ getFeature internalLayer layers filters with_batch_norm with_last_pooling= do
         sym <- if with_batch_norm then batchnorm ("bn" ++ ident) (#data := sym .& Nil) else return sym
         activation ("relu" ++ ident) (#data := sym .& #act_type := #relu .& Nil)
 
-getTopFeature :: SymbolHandle -> IO SymbolHandle
-getTopFeature input_data = do
-    sym <- flatten "flatten" (#data := input_data .& Nil)
-    sym <- fullyConnected "fc6" (#data := sym .& #num_hidden := 4096 .& Nil)
-    sym <- activation "relu6" (#data := sym .& #act_type := #relu .& Nil)
-    sym <- dropout "drop6" (#data := sym .& #p := 0.5 .& Nil)
-    sym <- fullyConnected "fc7" (#data := sym .& #num_hidden := 4096 .& Nil)
-    sym <- activation "relu7" (#data := sym .& #act_type := #relu .& Nil)
-    dropout "drop7" (#data := sym .& #p := 0.5 .& Nil)
+getTopFeature :: Maybe String -> SymbolHandle -> IO SymbolHandle
+getTopFeature prefix input_data = do
+    let addPrefix = (fromMaybe "" prefix ++)
+    sym <- flatten (addPrefix "flatten") (#data := input_data .& Nil)
+    sym <- fullyConnected (addPrefix "fc6") (#data := sym .& #num_hidden := 4096 .& Nil)
+    sym <- activation (addPrefix "relu6") (#data := sym .& #act_type := #relu .& Nil)
+    sym <- dropout (addPrefix "drop6") (#data := sym .& #p := 0.5 .& Nil)
+    sym <- fullyConnected (addPrefix "fc7") (#data := sym .& #num_hidden := 4096 .& Nil)
+    sym <- activation (addPrefix "relu7") (#data := sym .& #act_type := #relu .& Nil)
+    dropout (addPrefix "drop7") (#data := sym .& #p := 0.5 .& Nil)
 
-getClassifier :: SymbolHandle -> Int -> IO SymbolHandle
-getClassifier input_data num_classes = do
-    sym <- getTopFeature input_data
-    fullyConnected "fc8" (#data := sym .& #num_hidden := num_classes .& Nil)
+getClassifier :: Maybe String -> SymbolHandle -> Int -> IO SymbolHandle
+getClassifier prefix input_data num_classes = do
+    let addPrefix = (fromMaybe "" prefix ++)
+    sym <- getTopFeature prefix input_data
+    fullyConnected (addPrefix "fc8") (#data := sym .& #num_hidden := num_classes .& Nil)
 
 symbol :: Int -> Int -> Bool -> IO (Symbol Float)
 symbol num_classes num_layers with_batch_norm = do
     sym <- variable "data"
     sym <- getFeature sym layers filters with_batch_norm True
-    sym <- getClassifier sym num_classes
+    sym <- getClassifier Nothing sym num_classes
     sym <- softmaxoutput "softmax" (#data := sym .& Nil)
     return (Symbol sym)
 

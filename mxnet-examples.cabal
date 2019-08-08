@@ -86,6 +86,7 @@ Executable rcnn
                       , lens >= 4.12
                       , repa
                       , random-fu
+                      , directory
                       , mxnet-base
                       , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3

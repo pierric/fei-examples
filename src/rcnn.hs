@@ -14,11 +14,12 @@ import Options.Applicative (
     info, helper, fullDesc, header, (<**>))
 import Data.Attoparsec.Text (sepBy, char, rational, decimal, parse, maybeResult)
 import qualified Data.Text as T
+import System.Directory (doesFileExist, canonicalizePath)
 
 import MXNet.Base (
     NDArray(..), toVector,
     contextCPU, contextGPU0, 
-    mxListAllOpNames, mxNotifyShutdown, 
+    mxListAllOpNames, mxNotifyShutdown, mxNDArraySave,
     registerCustomOperator, 
     ndshape,
     listOutputs, internals, inferShape, at',
@@ -28,6 +29,7 @@ import MXNet.NN
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.DataIter.Coco as Coco
+import MXNet.NN.Utils (loadSession)
 import Model.FasterRCNN
 
 data CocoConfig = CocoConfig {
@@ -90,18 +92,25 @@ toTriple [a, b, c] = (a, b, c)
 default_initializer :: Initializer Float
 default_initializer name shp = normal 0.1 name shp
 
+loadWeights weights_path = do
+    weights_path <- liftIO $ canonicalizePath weights_path
+    e <- liftIO $ doesFileExist (weights_path ++ ".params")
+    if not e 
+        then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist." 
+        else loadSession weights_path
+
 main :: IO ()
-main = do
+main0 = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
     sym  <- symbolTrain rcnn_conf
 
-    res  <- inferShape sym [
-                ("data",        [1,3, 600, 1000]),
-                ("im_info",     [1, 3]),
-                ("gt_boxes",    [1, 0, 5]) ]
-    print res
+    -- res  <- inferShape sym [
+    --             ("data",        [1,3, 600, 1000]),
+    --             ("im_info",     [1, 3]),
+    --             ("gt_boxes",    [1, 0, 5]) ]
+    -- print res
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     let extr_feature_shape (w, h) = do
@@ -135,9 +144,11 @@ main = do
         _cfg_default_initializer = default_initializer,
         _cfg_context = contextCPU
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
+    optimizer <- makeOptimizer SGD'Mom (Const 0.00001) Nil
 
-    train sess $
+    train sess $ do
+        unless (null pretrained_weights) (loadWeights pretrained_weights)
+
         void $ forEachD_i data_iter $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
             -- fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 2
             liftIO $ putStrLn $ "[Train] "
@@ -160,21 +171,45 @@ main = do
 
     mxNotifyShutdown
 
-main0 = do
-    (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+main = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
+    (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
     sym  <- symbolTrain rcnn_conf
-    isym <- internals sym
-    fsym <- at' isym "rpn_cls_prob_output"
-    res  <- inferShape sym [("data", [1,3,coco_img_long_side, coco_img_short_side])]
-    print res
-    -- let arg_ind = scanl (+) 0 $ map length shapes
-    --     arg_shp = concat shapes
-    -- print (names, arg_ind, arg_shp)
-    -- (inp_shp, out_shp, aux_shp, complete) <- mxSymbolInferShape sym names arg_ind arg_shp
-    -- -- unless complete $ error "incomplete shapes"
-    -- print (inp_shp, out_shp, aux_shp, complete)
+
+    -- res  <- inferShape sym [
+    --             ("data",        [1,3, 600, 1000]),
+    --             ("im_info",     [1, 3]),
+    --             ("gt_boxes",    [1, 0, 5]) ]
+    -- print res
+
+    rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
+    let extr_feature_shape (w, h) = do
+            -- get the feature (width, height) at the top of feature extraction.
+            (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
+            return (feat_width, feat_height)
+
+    coco_inst <- coco coco_base_path "val2017"
+    let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
+                        (#anchor_scales := rpn_anchor_scales
+                      .& #anchor_ratios := rpn_anchor_ratios
+                      .& #batch_rois    := rpn_batch_rois
+                      .& #feature_stride:= rpn_feature_stride
+                      .& #allowed_border:= rpn_allowd_border
+                      .& #fg_fraction   := rpn_fg_fraction
+                      .& #fg_overlap    := rpn_fg_overlap
+                      .& #bg_overlap    := rpn_bg_overlap
+                      .& #short_size    := coco_img_short_side
+                      .& #long_size     := coco_img_long_side
+                      .& #mean          := toTriple coco_img_pixel_means
+                      .& #std           := toTriple coco_img_pixel_stds
+                      .& #batch_size    := rcnn_batch_size
+                      .& Nil)
+    
+    ds <- takeD 2 data_iter
+    forM_ (zip[0..] ds) $ \ (i, ((d0, d1, d2), (l1, l2, l3))) -> do
+        mxNDArraySave ("image" ++ show i) (zip ["image", "info", "gt", "label", "target", "weight"] (map unNDArray [d0, d1, d2, l1, l2, l3]))
+
     mxNotifyShutdown
     return ()
 

@@ -64,7 +64,6 @@ data RcnnConfiguration = RcnnConfiguration {
 symbolTrain :: RcnnConfiguration -> IO (Symbol Float)
 symbolTrain RcnnConfiguration{..} =  do
     let numAnchors = length rpn_anchor_scales * length rpn_anchor_ratios
-    print ("symbolTrain", numAnchors)
     -- dat:
     dat <- variable "data"
     -- imInfo:
@@ -127,7 +126,7 @@ symbolTrain RcnnConfiguration{..} =  do
     roiPool <- _ROIPooling "roi_pool" (#data := convFeat .& #rois := rois
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
-    topFeat <- VGG.getTopFeature roiPool
+    topFeat <- VGG.getTopFeature (Just "rcnn_") roiPool
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
 
@@ -484,7 +483,7 @@ instance EvalMetricMethod RPNLogLossMetric where
         let mask = Repa.map (/= -1) label :: Repa.Array _ _ Bool
 
         pred  <- Repa.selectP (mask #!) (\i -> pred  Repa.! (Z :. i :. (floor $ label #! i))) size
-        traceShowM pred
+        -- traceShowM pred
         label <- Repa.selectP (mask #!) (label #!) size
 
         let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
@@ -517,8 +516,8 @@ instance EvalMetricMethod RCNNLogLossMetric where
         let cls_prob = outputs !! cindex
             label    = outputs !! lindex
 
-        ndshape cls_prob >>= print
-        ndshape label >>= print
+        -- ndshape cls_prob >>= print
+        -- ndshape label >>= print
 
         cls_prob <- toRepa @DIM2 cls_prob
         label    <- toRepa @DIM1 label
@@ -527,7 +526,7 @@ instance EvalMetricMethod RCNNLogLossMetric where
             cls = Repa.fromFunction (Z :. size) (\ (Z :. i) -> cls_prob Repa.! (Z :. i :. (floor $ label #! i)))
 
         cls_loss_val <- Repa.sumAllP $ Repa.map (\v -> - log(1e-14 + v)) cls
-        traceShowM cls_loss_val
+        -- traceShowM cls_loss_val
         modifyIORef sumRef (+ realToFrac cls_loss_val)
         modifyIORef cntRef (+ size)
 
@@ -586,8 +585,8 @@ instance EvalMetricMethod RCNNL1LossMetric where
         let bbox_loss = outputs !! bindex
             label     = outputs !! lindex
 
-        ndshape bbox_loss >>= print
-        ndshape label >>= print
+        -- ndshape bbox_loss >>= print
+        -- ndshape label >>= print
 
         bbox_loss <- toRepa @DIM2 bbox_loss
         all_loss  <- Repa.sumAllP bbox_loss
