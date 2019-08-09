@@ -10,9 +10,9 @@ import Control.Monad.IO.Class
 import System.IO (hFlush, stdout)
 import Options.Applicative (
     Parser, execParser, 
-    long, value, option, auto, strOption, metavar, showDefault, maybeReader, help,
+    long, value, option, auto, strOption, metavar, showDefault, eitherReader, help,
     info, helper, fullDesc, header, (<**>))
-import Data.Attoparsec.Text (sepBy, char, rational, decimal, parse, maybeResult)
+import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
 import qualified Data.Text as T
 import System.Directory (doesFileExist, canonicalizePath)
 
@@ -31,6 +31,19 @@ import MXNet.NN.DataIter.Conduit
 import MXNet.NN.DataIter.Coco as Coco
 import MXNet.NN.Utils (loadSession)
 import Model.FasterRCNN
+
+import qualified Data.Vector as V
+import Control.Lens ((^.))
+import MXNet.Coco.Types (images, img_id, img_file_name)
+import qualified MXNet.NN.DataIter.Anchor as Anchor
+import Data.Array.Repa (Array, DIM1, DIM2, D, U, (:.)(..), Z (..), All(..), (+^), fromListUnboxed)
+import qualified Data.Array.Repa as Repa
+import qualified Data.Vector.Unboxed as UV
+import MXNet.Base ((!), (!?), (.&), fromVector)
+import Control.Lens ((^.), (%~) , view, makeLenses, _1, _2)
+import Control.Monad.Reader
+import Control.Exception
+import Debug.Trace
 
 data CocoConfig = CocoConfig {
     coco_base_path       :: String,
@@ -71,9 +84,9 @@ cmdArgParser = liftA2 (,)
                     <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN" <> showDefault <> value [0,0,0] <> help "RGB mean of images")
                     <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS" <> showDefault <> value [1,1,1] <> help "RGB std-dev of images"))
   where
-    list obj  = maybeResult . parse (sepBy obj (char ',')) . T.pack
-    floatList = maybeReader $ list rational
-    intList   = maybeReader $ list decimal
+    list obj  = parseOnly (sepBy obj (char ',') <* endOfInput) . T.pack
+    floatList = eitherReader $ list rational
+    intList   = eitherReader $ list decimal
 
 buildProposalTargetProp params = do
     let params' = M.fromList params
@@ -87,6 +100,7 @@ buildProposalTargetProp params = do
     }
 
 toTriple [a, b, c] = (a, b, c)
+toTriple x = error (show x)
 
 
 default_initializer :: Initializer Float
@@ -100,7 +114,7 @@ loadWeights weights_path = do
         else loadSession weights_path
 
 main :: IO ()
-main0 = do
+main = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
@@ -171,7 +185,7 @@ main0 = do
 
     mxNotifyShutdown
 
-main = do
+main0 = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
@@ -189,7 +203,7 @@ main = do
             (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
             return (feat_width, feat_height)
 
-    coco_inst <- coco coco_base_path "val2017"
+    coco_inst@(Coco _ _ _coco_inst) <- coco coco_base_path "val2017"
     let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
                         (#anchor_scales := rpn_anchor_scales
                       .& #anchor_ratios := rpn_anchor_ratios
@@ -206,9 +220,41 @@ main = do
                       .& #batch_size    := rcnn_batch_size
                       .& Nil)
     
-    ds <- takeD 2 data_iter
+    let cnt = 2
+    print (V.map (\img -> (img ^. img_id, img ^. img_file_name)) $ V.take cnt $ _coco_inst ^. images)
+
+    let anchorMake info = do
+            vinfo <- toVector info            
+            let imHeight = floor $ vinfo SV.! 0
+                imWidth  = floor $ vinfo SV.! 1
+            (featureWidth, featureHeight) <- extr_feature_shape (imWidth, imHeight)
+            anchors <- runReaderT (Anchor.anchors rpn_feature_stride featureWidth featureHeight) anchConf
+            convertToMX $ V.toList anchors
+          where 
+            anchConf = Anchor.Configuration {
+                            Anchor._conf_anchor_scales  = rpn_anchor_scales,
+                            Anchor._conf_anchor_ratios  = rpn_anchor_ratios,
+                            Anchor._conf_allowed_border = rpn_allowd_border,
+                            Anchor._conf_fg_num         = floor $ rpn_fg_fraction * fromIntegral rpn_batch_rois,
+                            Anchor._conf_batch_num      = rpn_batch_rois,
+                            Anchor._conf_fg_overlap     = rpn_fg_overlap,
+                            Anchor._conf_bg_overlap     = rpn_bg_overlap
+                        }
+            convert :: Repa.Shape sh => [Array U sh Float] -> ([Int], UV.Vector Float)
+            convert xs = assert (not (null xs)) $ (ext, vec)
+              where
+                vec = UV.concat $ map Repa.toUnboxed xs
+                sh0 = Repa.extent (head xs)
+                ext = length xs : reverse (Repa.listOfShape sh0)
+                    
+            convertToMX :: Repa.Shape sh => [Array U sh Float] -> IO (NDArray Float)
+            convertToMX   = uncurry fromVector . (_2 %~ UV.convert) . convert
+
+    ds <- takeD cnt data_iter
     forM_ (zip[0..] ds) $ \ (i, ((d0, d1, d2), (l1, l2, l3))) -> do
-        mxNDArraySave ("image" ++ show i) (zip ["image", "info", "gt", "label", "target", "weight"] (map unNDArray [d0, d1, d2, l1, l2, l3]))
+        anch <- anchorMake d1
+        mxNDArraySave ("image" ++ show i) (zip ["anchors", "image", "info", "gt", "label", "target", "weight"] (map unNDArray [anch, d0, d1, d2, l1, l2, l3]))
+
 
     mxNotifyShutdown
     return ()
