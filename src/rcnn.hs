@@ -158,7 +158,7 @@ main = do
         _cfg_default_initializer = default_initializer,
         _cfg_context = contextCPU
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.00001) Nil
+    optimizer <- makeOptimizer SGD'Mom (Const 0.00001) (#momentum := 0.9 .& #wd := 0.0005 .& #clip_gradient := 5 .& Nil)
 
     train sess $ do
         unless (null pretrained_weights) (loadWeights pretrained_weights)
