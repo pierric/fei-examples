@@ -78,7 +78,7 @@ Executable rcnn
   ghc-options:          -Wall
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
-                      , unordered-containers >= 0.2.8
+                      , unordered-containers >= 0.2.10
                       , vector >= 0.12
                       , optparse-applicative
                       , attoparsec
@@ -88,6 +88,7 @@ Executable rcnn
                       , random-fu
                       , directory
                       , mtl
+                    --   , cuda
                       , mxnet-base
                       , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3

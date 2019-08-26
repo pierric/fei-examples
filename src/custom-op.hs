@@ -116,7 +116,7 @@ main = do
 
         total1 <- sizeD trainingData
         liftIO $ putStrLn $ "[Train] "
-        forM_ (enumFromTo 1 1 :: [Int]) $ \ind -> do
+        forM_ (enumFromTo 1 20 :: [Int]) $ \ind -> do
             liftIO $ putStrLn $ "iteration " ++ show ind
             metric <- NN.newMetric "train" (NN.CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do

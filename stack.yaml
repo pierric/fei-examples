@@ -26,8 +26,10 @@ extra-deps:
 - JuicyPixels-repa-0.7.1.0
 - streaming-utils-0.1.4.7
 - graphviz-2999.20.0.3
+- unordered-containers-0.2.10.0
+- cuda-0.10.1.0
 extra-include-dirs:
-- /home/jiasen/dschungel/incubator-mxnet/include
-- /home/jiasen/dschungel/incubator-mxnet/3rdparty/tvm/nnvm/include/
+- /home/jiasen/dschungel/incubator-mxnet-1.5/include
+- /home/jiasen/dschungel/incubator-mxnet-1.5/3rdparty/tvm/nnvm/include/
 extra-lib-dirs:
-- /home/jiasen/dschungel/incubator-mxnet/lib
+- /home/jiasen/dschungel/incubator-mxnet-1.5/lib
