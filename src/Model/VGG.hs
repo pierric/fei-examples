@@ -28,7 +28,7 @@ getFeature internalLayer layers filters with_batch_norm with_last_pooling= do
 
     build2 idx1 sym (idx2, filter) = do
         let ident = printf "%d_%d" idx1 idx2
-        sym <- convolution ("conv" ++ ident) (#data := sym .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := filter .& Nil)
+        sym <- convolution ("conv" ++ ident) (#data := sym .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := filter .& #workspace := 2048 .& Nil)
         sym <- if with_batch_norm then batchnorm ("bn" ++ ident) (#data := sym .& Nil) else return sym
         activation ("relu" ++ ident) (#data := sym .& #act_type := #relu .& Nil)
 

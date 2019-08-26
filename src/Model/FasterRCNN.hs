@@ -30,6 +30,7 @@ import MXNet.Base.Operators.NDArray (_set_value_upd, argmax, argmax_channel)
 import MXNet.Base.Operators.Symbol (
     elemwise_mul, elemwise_sub, smooth_l1, softmax, _SoftmaxOutput, _ROIPooling,
     _MakeLoss, _contrib_MultiProposal, _BlockGrad, _Custom)
+import qualified MXNet.Base.NDArray as A
 import qualified MXNet.NN.NDArray as A
 import MXNet.NN.Layer
 import MXNet.NN.EvalMetric
@@ -137,11 +138,14 @@ symbolTrain RcnnConfiguration{..} =  do
     bboxPredReg <- elemwise_sub "bbox_pred_reg" (#lhs := bboxPred .& #rhs := bboxTarget .& Nil)
     bboxPredRegSmooth <- smooth_l1 "bbox_pred_reg_smooth" (#data := bboxPredReg .& #scalar := 1.0 .& Nil)
     bboxLoss_ <- elemwise_mul "bbox_loss_" (#lhs := bboxPredRegSmooth .& #rhs := bboxWeight .& Nil)
-    bboxLoss  <- _MakeLoss "bbox_loss" (#data := bboxLoss_ .& #grad_scale := 1.0 / fromIntegral rpn_batch_rois .& Nil)
+    bboxLoss  <- _MakeLoss "bbox_loss" (#data := bboxLoss_ .& #grad_scale := 1.0 / fromIntegral rcnn_batch_rois .& Nil)
 
-    labelSG <- _BlockGrad "label_sg" (#data := label .& Nil)
+    labelReshape    <- reshape "label_reshape"     (#data := label    .& #shape := [rcnn_batch_size, -1] .& Nil)
+    clsProbReshape  <- reshape "cls_prob_reshape"  (#data := clsProb  .& #shape := [rcnn_batch_size, -1, rcnn_num_classes] .& Nil)
+    bboxLossReshape <- reshape "bbox_loss_reshape" (#data := bboxLoss .& #shape := [rcnn_batch_size, -1, 4 * rcnn_num_classes] .& Nil)
+    labelSG <- _BlockGrad "label_sg" (#data := labelReshape .& Nil)
 
-    Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProb, bboxLoss, labelSG]
+    Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG]
 
 --------------------------------
 
@@ -183,35 +187,32 @@ instance CustomOperation (Operation ProposalTargetProp) where
             batch_size = prop ^. batch_images
 
         -- convert NDArray to Vector of Repa array.
-        r_rois   <- arrayToRepa rois     >>= return . toRows2
-        r_gt     <- arrayToRepa gt_boxes >>= return . toRows3
+        r_rois   <- toRepa @DIM2 (NDArray rois)     >>= return . toRows2
+        r_gt     <- toRepa @DIM3 (NDArray gt_boxes) >>= return . toRows3
 
         assert (batch_size == length r_gt) (return ())
 
         (rois, labels, bbox_targets, bbox_weights) <- V.unzip4 <$> V.mapM (sample_batch r_rois r_gt) (V.enumFromN (0 :: Int) batch_size)
-        let rois'   = Repa.computeUnboxedS $ vstack $ V.map (Repa.reshape (Z :. 1 :. 5)) $ join rois
+        let rois'   = vstack $ V.map (Repa.reshape (Z :. 1 :. 5)) $ join rois
             labels' = join labels
-            bbox_targets' = Repa.computeUnboxedS $ vstack bbox_targets
-            bbox_weights' = Repa.computeUnboxedS $ vstack bbox_weights
+            bbox_targets' = vstack bbox_targets
+            bbox_weights' = vstack bbox_weights
 
-        ndsize (NDArray rois_output)        >>= \s -> assert (s == Repa.size (Repa.extent rois'))         (return ())
-        ndsize (NDArray bbox_target_output) >>= \s -> assert (s == Repa.size (Repa.extent bbox_targets')) (return ())
-        ndsize (NDArray bbox_weight_output) >>= \s -> assert (s == Repa.size (Repa.extent bbox_weights')) (return ())
+            rois_output_nd        = NDArray rois_output        :: NDArray Float
+            bbox_target_output_nd = NDArray bbox_target_output :: NDArray Float
+            bbox_weight_output_nd = NDArray bbox_weight_output :: NDArray Float
+            label_output_nd       = NDArray label_output       :: NDArray Float
 
-        copyFromVector (NDArray rois_output        :: NDArray Float) $ UV.convert $ Repa.toUnboxed rois'
-        copyFromVector (NDArray label_output       :: NDArray Float) $ V.convert labels'
-        copyFromVector (NDArray bbox_target_output :: NDArray Float) $ UV.convert $ Repa.toUnboxed bbox_targets'
-        copyFromVector (NDArray bbox_weight_output :: NDArray Float) $ UV.convert $ Repa.toUnboxed bbox_weights'
+        ndsize rois_output_nd >>= \s -> assert (s == Repa.size (Repa.extent rois'))         (return ())
+        ndsize bbox_target_output_nd >>= \s -> assert (s == Repa.size (Repa.extent bbox_targets')) (return ())
+        ndsize bbox_weight_output_nd >>= \s -> assert (s == Repa.size (Repa.extent bbox_weights')) (return ())
+
+        copyFromRepa rois_output_nd rois'
+        copyFromRepa bbox_target_output_nd bbox_targets'
+        copyFromRepa bbox_weight_output_nd bbox_weights'
+        copyFromVector label_output_nd $ V.convert labels'
 
       where
-        arrayToRepa :: Repa.Shape sh => NDArrayHandle -> IO (Repa.Array Repa.U sh Float)
-        arrayToRepa hdl = do
-            let arr = NDArray hdl
-            -- the Repa needs a reversed representation of shape
-            shape <- shapeOfList . reverse <$> ndshape arr
-            vec   <- toVector arr
-            return $ Repa.fromUnboxed shape $ UV.convert vec
-
         toRows2 arr = let Z :. rows :._ = Repa.extent arr
                           range = V.enumFromN (0 :: Int) rows
                       in V.map (\i -> Repa.slice arr (Z :. i :. All)) range
@@ -256,9 +257,9 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     let num_rois = V.length rois
     -- print(num_rois, V.length gt_boxes)
     -- assert (num_rois == V.length gt_boxes) (return ())
-    overlaps <- let aoi_boxes = V.map (Repa.extract (Z:.1) (Z:.4)) rois
-                    gt_boxes  = V.map (Repa.extract (Z:.0) (Z:.4)) gt
-                in Repa.computeUnboxedP $ overlapMatrix aoi_boxes gt_boxes
+    let aoi_boxes = V.map (Repa.extract (Z:.1) (Z:.4)) rois
+        gt_boxes  = V.map (Repa.extract (Z:.0) (Z:.4)) gt
+        overlaps  = Repa.computeUnboxedS $ overlapMatrix aoi_boxes gt_boxes
 
     let maxIndices = argMax overlaps
         gt_chosen  = V.map (gt %!) maxIndices
@@ -401,6 +402,7 @@ instance EvalMetricMethod RPNAccMetric where
         let label = bindings M.! lname
             pred  = outputs !! oindex
 
+        pred <- A.makeNDArrayLike pred contextCPU >>= A.copy pred
         [pred_label] <- argmax_channel (#data := unNDArray pred .& Nil)
         pred_label <- V.convert <$> toVector (NDArray pred_label)
         label <- V.convert <$> toVector label
@@ -408,8 +410,8 @@ instance EvalMetricMethod RPNAccMetric where
         let pairs = V.filter ((/= -1) . fst) $ V.zip label pred_label
             equal = V.filter (uncurry (==)) pairs
 
-        modifyIORef sumRef (+ length equal)
-        modifyIORef cntRef (+ length pairs)
+        modifyIORef' sumRef (+ length equal)
+        modifyIORef' cntRef (+ length pairs)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -435,6 +437,7 @@ instance EvalMetricMethod RCNNAccMetric where
         let cls_prob = outputs !! cindex
             label    = outputs !! lindex
 
+        cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 1 .& Nil)
         pred_class <- V.convert <$> toVector (NDArray pred_class)
         label <- V.convert <$> toVector label
@@ -442,8 +445,8 @@ instance EvalMetricMethod RCNNAccMetric where
         let pairs = V.zip label pred_class
             equal = V.filter (uncurry (==)) pairs
 
-        modifyIORef sumRef (+ length equal)
-        modifyIORef cntRef (+ length pairs)
+        modifyIORef' sumRef (+ length equal)
+        modifyIORef' cntRef (+ length pairs)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -475,9 +478,9 @@ instance EvalMetricMethod RPNLogLossMetric where
 
         -- (batch_size, #channel, #num_anchors*feat_w, feat_h) to (batch_size, #channel, #num_anchors*feat_w*feat_h)
         -- to (batch_size, #num_anchors*feat_w*feat_h, #channel) to (batch_size*#num_anchors*feat_w*feat_h, #channel)
+        cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         pred  <- A.reshape cls_prob [0, 0, -1] >>= flip A.transpose [0, 2, 1] >>= flip A.reshape [size, -1]
         pred  <- toRepa @DIM2 pred
-
 
         -- mark out labels where value -1
         let mask = Repa.map (/= -1) label :: Repa.Array _ _ Bool
@@ -490,8 +493,8 @@ instance EvalMetricMethod RPNLogLossMetric where
         cls_loss <- Repa.foldP (+) 0 pred_with_ep
         
         let cls_loss_val = realToFrac (cls_loss #! 0)
-        modifyIORef sumRef (+ cls_loss_val)
-        modifyIORef cntRef (+ size)
+        modifyIORef' sumRef (+ cls_loss_val)
+        modifyIORef' cntRef (+ size)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -516,9 +519,6 @@ instance EvalMetricMethod RCNNLogLossMetric where
         let cls_prob = outputs !! cindex
             label    = outputs !! lindex
 
-        -- ndshape cls_prob >>= print
-        -- ndshape label >>= print
-
         cls_prob <- toRepa @DIM2 cls_prob
         label    <- toRepa @DIM1 label
         
@@ -527,8 +527,8 @@ instance EvalMetricMethod RCNNLogLossMetric where
 
         cls_loss_val <- Repa.sumAllP $ Repa.map (\v -> - log(1e-14 + v)) cls
         -- traceShowM cls_loss_val
-        modifyIORef sumRef (+ realToFrac cls_loss_val)
-        modifyIORef cntRef (+ size)
+        modifyIORef' sumRef (+ realToFrac cls_loss_val)
+        modifyIORef' cntRef (+ size)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -559,8 +559,8 @@ instance EvalMetricMethod RPNL1LossMetric where
         bbox_weight <- toRepa @DIM4 bbox_weight
         all_pos_weight <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) bbox_weight
 
-        modifyIORef sumRef (+ realToFrac all_loss)
-        modifyIORef cntRef (+ (all_pos_weight `div` 4))
+        modifyIORef' sumRef (+ realToFrac all_loss)
+        modifyIORef' cntRef (+ (all_pos_weight `div` 4))
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -581,12 +581,9 @@ instance EvalMetricMethod RCNNL1LossMetric where
         n <- liftIO $ readIORef cntRef
         return $ printf "<RCNNL1Loss: %0.3f>" (realToFrac s / fromIntegral n :: Float)
 
-    evaluate (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) bindings outputs = liftIO $  do
+    evaluate (RCNNL1LossMetricData phase bindex lindex cntRef sumRef) bindings outputs = liftIO $ do
         let bbox_loss = outputs !! bindex
             label     = outputs !! lindex
-
-        -- ndshape bbox_loss >>= print
-        -- ndshape label >>= print
 
         bbox_loss <- toRepa @DIM2 bbox_loss
         all_loss  <- Repa.sumAllP bbox_loss
@@ -594,8 +591,8 @@ instance EvalMetricMethod RCNNL1LossMetric where
         label     <- toRepa @DIM1 label
         all_pos   <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) label
 
-        modifyIORef sumRef (+ realToFrac all_loss)
-        modifyIORef cntRef (+ all_pos)
+        modifyIORef' sumRef (+ realToFrac all_loss)
+        modifyIORef' cntRef (+ all_pos)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
