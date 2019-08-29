@@ -7,6 +7,7 @@ import Control.Monad (forM_, void, unless)
 import Control.Applicative (liftA2)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
+import Control.Lens ((.=))
 import System.IO (hFlush, stdout)
 import Options.Applicative (
     Parser, execParser, 
