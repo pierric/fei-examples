@@ -24,26 +24,29 @@ import MXNet.Base (
     ndshape,
     listOutputs, internals, inferShape, at',
     HMap(..), (.&), ArgOf(..))
--- import qualified MXNet.Base.Operators.NDArray as A
 import MXNet.NN
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.DataIter.Coco as Coco
-import MXNet.NN.Utils (loadSession)
+import MXNet.NN.Utils (loadSession, saveSession)
 import Model.FasterRCNN
 
-import qualified Data.Vector as V
-import Control.Lens ((^.))
-import MXNet.Coco.Types (images, img_id, img_file_name)
-import qualified MXNet.NN.DataIter.Anchor as Anchor
-import Data.Array.Repa (Array, DIM1, DIM2, D, U, (:.)(..), Z (..), All(..), (+^), fromListUnboxed)
-import qualified Data.Array.Repa as Repa
-import qualified Data.Vector.Unboxed as UV
-import MXNet.Base ((!), (!?), (.&), fromVector)
-import Control.Lens ((^.), (%~) , view, makeLenses, _1, _2)
-import Control.Monad.Reader
-import Control.Exception
-import Debug.Trace
+-- import qualified Data.Vector as V
+-- import Control.Lens ((^.), (.=), use)
+-- import MXNet.Coco.Types (images, img_id, img_file_name)
+-- import qualified MXNet.NN.DataIter.Anchor as Anchor
+-- import Data.Array.Repa (Array, DIM1, DIM2, D, U, (:.)(..), Z (..), All(..), (+^), fromListUnboxed)
+-- import qualified Data.Array.Repa as Repa
+-- import qualified Data.Vector.Unboxed as UV
+-- import MXNet.Base ((!), (!?), (.&), fromVector)
+-- import Control.Lens ((^.), (%~) , view, makeLenses, _1, _2)
+-- import Control.Monad.Reader
+-- import Control.Exception
+-- import Debug.Trace
+-- import MXNet.Base (ndsize)
+-- import MXNet.NN.DataIter.Vec
+
+-- import qualified Foreign.CUDA.Driver.Profiler as CUDA
 
 data CocoConfig = CocoConfig {
     coco_base_path       :: String,
@@ -68,9 +71,9 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "rpn-fg-overlap"    <> metavar "FG-OVERLAP"     <> showDefault <> value 0.7       <> help "rpn foreground iou threshold")
                     <*> option auto      (long "rpn-bg-overlap"    <> metavar "BG-OVERLAP"     <> showDefault <> value 0.3       <> help "rpn background iou threshold")
                     <*> option auto      (long "rpn-allowed-border"<> metavar "ALLOWED-BORDER" <> showDefault <> value 0         <> help "rpn allowed border")
-                    <*> option auto      (long "rcnn-num-classes"  <> metavar "NUM-CLASSES"    <> showDefault <> value 21        <> help "rcnn number of classes")
+                    <*> option auto      (long "rcnn-num-classes"  <> metavar "NUM-CLASSES"    <> showDefault <> value 81        <> help "rcnn number of classes")
                     <*> option auto      (long "rcnn-feat-stride"  <> metavar "FEATURE-STRIDE" <> showDefault <> value 16        <> help "rcnn feature stride")
-                    <*> option intList   (long "rcnn-pooled-size"  <> metavar "POOLED-SIZE"    <> showDefault <> value [14,14]   <> help "rcnn pooled size")
+                    <*> option intList   (long "rcnn-pooled-size"  <> metavar "POOLED-SIZE"    <> showDefault <> value [7,7]     <> help "rcnn pooled size")
                     <*> option auto      (long "rcnn-batch-rois"   <> metavar "BATCH_ROIS"     <> showDefault <> value 128       <> help "rcnn batch rois")
                     <*> option auto      (long "rcnn-batch-size"   <> metavar "BATCH-SIZE"     <> showDefault <> value 1         <> help "rcnn batch size")
                     <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"    <> showDefault <> value 0.25      <> help "rcnn foreground fraction")
@@ -104,14 +107,34 @@ toTriple x = error (show x)
 
 
 default_initializer :: Initializer Float
-default_initializer name shp = normal 0.1 name shp
+default_initializer name = case name of
+    "rpn_conv_3x3_weight"  -> normal 0.01 name
+    "rpn_conv_3x3_bias"    -> zeros name
+    "rpn_cls_score_weight" -> normal 0.01 name
+    "rpn_cls_score_bias"   -> zeros name
+    "rpn_bbox_pred_weight" -> normal 0.01 name
+    "rpn_bbox_pred_bias"   -> zeros name
+    "cls_score_weight"     -> normal 0.01 name
+    "cls_score_bias"       -> zeros name
+    "bbox_pred_weight"     -> normal 0.001 name
+    "bbox_pred_bias"       -> zeros name
+    _ -> empty name
 
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
     if not e 
         then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist." 
-        else loadSession weights_path
+        else loadSession weights_path ["rpn_conv_3x3_weight",
+                                       "rpn_conv_3x3_bias",
+                                       "rpn_cls_score_weight",
+                                       "rpn_cls_score_bias",
+                                       "rpn_bbox_pred_weight",
+                                       "rpn_bbox_pred_bias",
+                                       "cls_score_weight",
+                                       "cls_score_bias",
+                                       "bbox_pred_weight",
+                                       "bbox_pred_bias"]                                       
 
 main :: IO ()
 main = do
@@ -132,7 +155,7 @@ main = do
             (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
             return (feat_width, feat_height)
 
-    coco_inst <- coco coco_base_path "val2017"
+    coco_inst <- coco coco_base_path "train2017"
     let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
                         (#anchor_scales := rpn_anchor_scales
                       .& #anchor_ratios := rpn_anchor_ratios
@@ -158,174 +181,156 @@ main = do
         _cfg_default_initializer = default_initializer,
         _cfg_context = contextCPU
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.00001) (#momentum := 0.9 .& #wd := 0.0005 .& #clip_gradient := 5 .& Nil)
+    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9 
+                                                   .& #wd := 0.0005 
+                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size) 
+                                                   .& #clip_gradient := 5 
+                                                   .& Nil)
 
     train sess $ do
+        sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
+
         unless (null pretrained_weights) (loadWeights pretrained_weights)
-
-        void $ forEachD_i data_iter $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
-            -- fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 2
-            liftIO $ putStrLn $ "[Train] "
-            forM_ [1, 2] $ \ind -> do
-                liftIO $ putStrLn $ "iteration " ++ show ind
-                void $ forEachD_i data_iter $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
-                    let binding = M.fromList [ ("data",        x0)
-                                             , ("im_info",     x1)
-                                             , ("gt_boxes",    x2)
-                                             , ("label",       y0)
-                                             , ("bbox_target", y1)
-                                             , ("bbox_weight", y2) ]
-                    metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
-                    fitAndEval optimizer binding metric
-                    eval <- format metric
-                    liftIO $ do
-                       putStr $ "\r\ESC[K" ++ show i ++ " " ++ eval
-                       hFlush stdout
-                liftIO $ putStrLn ""
-
-    mxNotifyShutdown
-
-main0 = do
-    _    <- mxListAllOpNames
-    registerCustomOperator ("proposal_target", buildProposalTargetProp)
-    (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
-    sym  <- symbolTrain rcnn_conf
-
-    -- res  <- inferShape sym [
-    --             ("data",        [1,3, 600, 1000]),
-    --             ("im_info",     [1, 3]),
-    --             ("gt_boxes",    [1, 0, 5]) ]
-    -- print res
-
-    rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
-    let extr_feature_shape (w, h) = do
-            -- get the feature (width, height) at the top of feature extraction.
-            (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
-            return (feat_width, feat_height)
-
-    coco_inst@(Coco _ _ _coco_inst) <- coco coco_base_path "val2017"
-    let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
-                        (#anchor_scales := rpn_anchor_scales
-                      .& #anchor_ratios := rpn_anchor_ratios
-                      .& #batch_rois    := rpn_batch_rois
-                      .& #feature_stride:= rpn_feature_stride
-                      .& #allowed_border:= rpn_allowd_border
-                      .& #fg_fraction   := rpn_fg_fraction
-                      .& #fg_overlap    := rpn_fg_overlap
-                      .& #bg_overlap    := rpn_bg_overlap
-                      .& #short_size    := coco_img_short_side
-                      .& #long_size     := coco_img_long_side
-                      .& #mean          := toTriple coco_img_pixel_means
-                      .& #std           := toTriple coco_img_pixel_stds
-                      .& #batch_size    := rcnn_batch_size
-                      .& Nil)
     
-    let cnt = 2
-    print (V.map (\img -> (img ^. img_id, img ^. img_file_name)) $ V.take cnt $ _coco_inst ^. images)
+        liftIO $ putStrLn $ "[Train] "
+        metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
+        forM_ [5] $ \ ei -> do
+            liftIO $ putStrLn $ "Epoch " ++ show ei
+            liftIO $ hFlush stdout
+            void $ forEachD_i data_iter $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
+                let binding = M.fromList [ ("data",        x0)
+                                         , ("im_info",     x1)
+                                         , ("gt_boxes",    x2)
+                                         , ("label",       y0)
+                                         , ("bbox_target", y1)
+                                         , ("bbox_weight", y2) ]
+                fitAndEval optimizer binding metric
+                eval <- format metric
+                liftIO $ do
+                    putStrLn $ show i ++ " " ++ eval
+                    hFlush stdout
+            liftIO $ putStrLn ""
 
-    let anchorMake info = do
-            vinfo <- toVector info            
-            let imHeight = floor $ vinfo SV.! 0
-                imWidth  = floor $ vinfo SV.! 1
-            (featureWidth, featureHeight) <- extr_feature_shape (imWidth, imHeight)
-            anchors <- runReaderT (Anchor.anchors rpn_feature_stride featureWidth featureHeight) anchConf
-            convertToMX $ V.toList anchors
-          where 
-            anchConf = Anchor.Configuration {
-                            Anchor._conf_anchor_scales  = rpn_anchor_scales,
-                            Anchor._conf_anchor_ratios  = rpn_anchor_ratios,
-                            Anchor._conf_allowed_border = rpn_allowd_border,
-                            Anchor._conf_fg_num         = floor $ rpn_fg_fraction * fromIntegral rpn_batch_rois,
-                            Anchor._conf_batch_num      = rpn_batch_rois,
-                            Anchor._conf_fg_overlap     = rpn_fg_overlap,
-                            Anchor._conf_bg_overlap     = rpn_bg_overlap
-                        }
-            convert :: Repa.Shape sh => [Array U sh Float] -> ([Int], UV.Vector Float)
-            convert xs = assert (not (null xs)) $ (ext, vec)
-              where
-                vec = UV.concat $ map Repa.toUnboxed xs
-                sh0 = Repa.extent (head xs)
-                ext = length xs : reverse (Repa.listOfShape sh0)
+    -- CUDA.stop
+    mxNotifyShutdown
+
+-- main0 = do
+--     _    <- mxListAllOpNames
+--     registerCustomOperator ("proposal_target", buildProposalTargetProp)
+--     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+--     sym  <- symbolTrain rcnn_conf
+
+--     -- res  <- inferShape sym [
+--     --             ("data",        [1,3, 600, 1000]),
+--     --             ("im_info",     [1, 3]),
+--     --             ("gt_boxes",    [1, 0, 5]) ]
+--     -- print res
+
+--     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
+--     let extr_feature_shape (w, h) = do
+--             -- get the feature (width, height) at the top of feature extraction.
+--             (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
+--             return (feat_width, feat_height)
+
+--     coco_inst@(Coco _ _ _coco_inst) <- coco coco_base_path "val2017"
+--     let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
+--                         (#anchor_scales := rpn_anchor_scales
+--                       .& #anchor_ratios := rpn_anchor_ratios
+--                       .& #batch_rois    := rpn_batch_rois
+--                       .& #feature_stride:= rpn_feature_stride
+--                       .& #allowed_border:= rpn_allowd_border
+--                       .& #fg_fraction   := rpn_fg_fraction
+--                       .& #fg_overlap    := rpn_fg_overlap
+--                       .& #bg_overlap    := rpn_bg_overlap
+--                       .& #short_size    := coco_img_short_side
+--                       .& #long_size     := coco_img_long_side
+--                       .& #mean          := toTriple coco_img_pixel_means
+--                       .& #std           := toTriple coco_img_pixel_stds
+--                       .& #batch_size    := rcnn_batch_size
+--                       .& Nil)
+    
+--     let cnt = 36
+--     print (V.map (\img -> (img ^. img_id, img ^. img_file_name)) $ V.take cnt $ _coco_inst ^. images)
+
+--     let anchorMake info = do
+--             vinfo <- toVector info            
+--             let imHeight = floor $ vinfo SV.! 0
+--                 imWidth  = floor $ vinfo SV.! 1
+--             (featureWidth, featureHeight) <- extr_feature_shape (imWidth, imHeight)
+--             anchors <- runReaderT (Anchor.anchors rpn_feature_stride featureWidth featureHeight) anchConf
+--             convertToMX $ V.toList anchors
+--           where 
+--             anchConf = Anchor.Configuration {
+--                             Anchor._conf_anchor_scales  = rpn_anchor_scales,
+--                             Anchor._conf_anchor_ratios  = rpn_anchor_ratios,
+--                             Anchor._conf_allowed_border = rpn_allowd_border,
+--                             Anchor._conf_fg_num         = floor $ rpn_fg_fraction * fromIntegral rpn_batch_rois,
+--                             Anchor._conf_batch_num      = rpn_batch_rois,
+--                             Anchor._conf_fg_overlap     = rpn_fg_overlap,
+--                             Anchor._conf_bg_overlap     = rpn_bg_overlap
+--                         }
+--             convert :: Repa.Shape sh => [Array U sh Float] -> ([Int], UV.Vector Float)
+--             convert xs = assert (not (null xs)) $ (ext, vec)
+--               where
+--                 vec = UV.concat $ map Repa.toUnboxed xs
+--                 sh0 = Repa.extent (head xs)
+--                 ext = length xs : reverse (Repa.listOfShape sh0)
                     
-            convertToMX :: Repa.Shape sh => [Array U sh Float] -> IO (NDArray Float)
-            convertToMX   = uncurry fromVector . (_2 %~ UV.convert) . convert
+--             convertToMX :: Repa.Shape sh => [Array U sh Float] -> IO (NDArray Float)
+--             convertToMX   = uncurry fromVector . (_2 %~ UV.convert) . convert
 
-    ds <- takeD cnt data_iter
-    forM_ (zip[0..] ds) $ \ (i, ((d0, d1, d2), (l1, l2, l3))) -> do
-        anch <- anchorMake d1
-        mxNDArraySave ("image" ++ show i) (zip ["anchors", "image", "info", "gt", "label", "target", "weight"] (map unNDArray [anch, d0, d1, d2, l1, l2, l3]))
+--     ds <- takeD cnt data_iter
+--     forM_ (zip[0..] ds) $ \ (i, ((d0, d1, d2), (l1, l2, l3))) -> do
+--         anch <- anchorMake d1
+--         mxNDArraySave ("image" ++ show i) (zip ["anchors", "image", "info", "gt", "label", "target", "weight"] (map unNDArray [anch, d0, d1, d2, l1, l2, l3]))
 
 
-    mxNotifyShutdown
-    return ()
+--     mxNotifyShutdown
+--     return ()
 
-main1 = do
-    _    <- mxListAllOpNames
-    registerCustomOperator ("proposal_target", buildProposalTargetProp)
-    let conf = RcnnConfiguration [1,2,4]  [0.5,1,2]  16  1  12000  1000  0.8  10  0.7  0.5  0.2  1  6  16  [14, 14] 128 1 0.25 0.5 [0.1, 0.1, 0.2, 0.2] ""
-    sym  <- symbolTrain conf
-    res  <- inferShape sym [
-                ("data",        [1,3, 600, 1000]),
-                ("im_info",     [1, 3]),
-                ("gt_boxes",    [1, 0, 5]) ]
-    print res
+-- main1 = do
+--     _    <- mxListAllOpNames
+--     registerCustomOperator ("proposal_target", buildProposalTargetProp)
+--     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+--     sym  <- symbolTrain rcnn_conf
+--     res  <- inferShape sym [
+--                 ("data",        [1,3, 600, 1000]),
+--                 ("im_info",     [1, 3]),
+--                 ("gt_boxes",    [1, 0, 5]) ]
+--     print res
 
-    -- ([  ("data",[1,3,600,1000]),
-    --     ("conv1_1-weight",[64,3,3,3]),
-    --     ("conv1_1-bias",[64]),
-    --     ("conv1_2-weight",[64,64,3,3]),
-    --     ("conv1_2-bias",[64]),
-    --     ("conv2_1-weight",[128,64,3,3]),
-    --     ("conv2_1-bias",[128]),
-    --     ("conv2_2-weight",[128,128,3,3]),
-    --     ("conv2_2-bias",[128]),
-    --     ("conv3_1-weight",[256,128,3,3]),
-    --     ("conv3_1-bias",[256]),
-    --     ("conv3_2-weight",[256,256,3,3]),
-    --     ("conv3_2-bias",[256]),
-    --     ("conv3_3-weight",[256,256,3,3]),
-    --     ("conv3_3-bias",[256]),
-    --     ("conv4_1-weight",[512,256,3,3]),
-    --     ("conv4_1-bias",[512]),
-    --     ("conv4_2-weight",[512,512,3,3]),
-    --     ("conv4_2-bias",[512]),
-    --     ("conv4_3-weight",[512,512,3,3]),
-    --     ("conv4_3-bias",[512]),
-    --     ("conv5_1-weight",[512,512,3,3]),
-    --     ("conv5_1-bias",[512]),
-    --     ("conv5_2-weight",[512,512,3,3]),
-    --     ("conv5_2-bias",[512]),
-    --     ("conv5_3-weight",[512,512,3,3]),
-    --     ("conv5_3-bias",[512]),
-    --     ("rpn_conv_3x3-weight",[512,512,3,3]),
-    --     ("rpn_conv_3x3-bias",[512]),
-    --     ("rpn_cls_score-weight",[18,512,1,1]),
-    --     ("rpn_cls_score-bias",[18]),
-    --     ("label",[1,5022]),
-    --     ("bbox_weight",[1,36,18,31]),
-    --     ("rpn_bbox_pred-weight",[36,512,1,1]),
-    --     ("rpn_bbox_pred-bias",[36]),
-    --     ("bbox_target",[1,36,18,31]),
-    --     ("im_info",[1,3]),
-    --     ("gt_boxes",[1,0,5]),
-    --     ("fc6-weight",[4096,100352]),
-    --     ("fc6-bias",[4096]),
-    --     ("fc7-weight",[4096,4096]),
-    --     ("fc7-bias",[4096]),
-    --     ("cls_score-weight",[6,4096]),
-    --     ("cls_score-bias",[6]),
-    --     ("bbox_pred-weight",[24,4096]),
-    --     ("bbox_pred-bias",[24])],[("rpn_cls_prob_output",[1,2,162,31]),
-    --     ("rpn_bbox_loss_output",[1,36,18,31]),
-    --     ("cls_prob_output",[128,6]),
-    --     ("bbox_loss_output",[128,24]),
-    --     ("label_sg_output",[128])],[],True)
+--     mxNotifyShutdown
+--     return ()
 
-    -- let arg_ind = scanl (+) 0 $ map length shapes
-    --     arg_shp = concat shapes
-    -- print (names, arg_ind, arg_shp)
-    -- (inp_shp, out_shp, aux_shp, complete) <- mxSymbolInferShape sym names arg_ind arg_shp
-    -- -- unless complete $ error "incomplete shapes"
-    -- print (inp_shp, out_shp, aux_shp, complete)
-    mxNotifyShutdown
-    return ()
+-- main2 = do
+--     _    <- mxListAllOpNames
+--     registerCustomOperator ("proposal_target", buildProposalTargetProp)
+--     (rcnn_conf@RcnnConfiguration{..}, CocoConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+--     sym  <- symbolTrain rcnn_conf
+
+--     sess <- initialize sym $ Config { 
+--         _cfg_data  = M.fromList [("data",        [3, coco_img_short_side, coco_img_long_side]), 
+--                                  ("im_info",     [3]),
+--                                  ("gt_boxes",    [0, 5])],
+--         _cfg_label = M.empty,
+--         _cfg_initializers = M.empty,
+--         _cfg_default_initializer = default_initializer,
+--         _cfg_context = contextCPU
+--     }
+
+--     let params = M.toList (sess ^. sess_param)
+
+--     print (sum $ map count params)
+
+--     totalSize <- mapM calcSize params
+--     print (sum totalSize)
+
+
+--   where
+--     calcSize (_, ParameterI a Nothing) = ndsize a
+--     calcSize (_, ParameterI a (Just b)) = liftM2 (+) (ndsize a) (ndsize b)
+--     calcSize (_, ParameterA a) = ndsize a
+
+--     count (_, ParameterI a Nothing) = 1
+--     count (_, ParameterI a (Just b)) = 2
+--     count (_, ParameterA a) = 1

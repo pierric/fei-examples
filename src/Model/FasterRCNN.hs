@@ -434,19 +434,22 @@ instance EvalMetricMethod RCNNAccMetric where
         return $ printf "<RCNNAcc: %0.2f>" (100 * fromIntegral s / fromIntegral n :: Float)
 
     evaluate (RCNNAccMetricData phase cindex lindex cntRef sumRef) bindings outputs = liftIO $  do
+        -- cls_prob: (batch_size, #num_anchors*feat_w*feat_h, #num_classes)
+        -- label:    (batch_size, #num_anchors*feat_w*feat_h)
         let cls_prob = outputs !! cindex
             label    = outputs !! lindex
 
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
-        [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 1 .& Nil)
-        pred_class <- V.convert <$> toVector (NDArray pred_class)
-        label <- V.convert <$> toVector label
+        [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
+        
+        pred_class <- toRepa @DIM2 (NDArray pred_class)
+        label <- toRepa @DIM2 label
 
-        let pairs = V.zip label pred_class
-            equal = V.filter (uncurry (==)) pairs
+        let pairs = UV.zip (Repa.toUnboxed label) (Repa.toUnboxed pred_class)
+            equal = UV.filter (uncurry (==)) pairs
 
-        modifyIORef' sumRef (+ length equal)
-        modifyIORef' cntRef (+ length pairs)
+        modifyIORef' sumRef (+ UV.length equal)
+        modifyIORef' cntRef (+ UV.length pairs)
 
         s <- readIORef sumRef
         n <- readIORef cntRef
@@ -519,11 +522,11 @@ instance EvalMetricMethod RCNNLogLossMetric where
         let cls_prob = outputs !! cindex
             label    = outputs !! lindex
 
-        cls_prob <- toRepa @DIM2 cls_prob
-        label    <- toRepa @DIM1 label
+        cls_prob <- toRepa @DIM3 cls_prob
+        label    <- toRepa @DIM2 label
         
-        let Z:.size = Repa.extent label 
-            cls = Repa.fromFunction (Z :. size) (\ (Z :. i) -> cls_prob Repa.! (Z :. i :. (floor $ label #! i)))
+        let lbl_shp@(Z :. _ :. size) = Repa.extent label 
+            cls = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) -> cls_prob Repa.! (Z :. bi :. ai :. (floor $ label Repa.! pos)))
 
         cls_loss_val <- Repa.sumAllP $ Repa.map (\v -> - log(1e-14 + v)) cls
         -- traceShowM cls_loss_val
@@ -585,10 +588,10 @@ instance EvalMetricMethod RCNNL1LossMetric where
         let bbox_loss = outputs !! bindex
             label     = outputs !! lindex
 
-        bbox_loss <- toRepa @DIM2 bbox_loss
+        bbox_loss <- toRepa @DIM3 bbox_loss
         all_loss  <- Repa.sumAllP bbox_loss
 
-        label     <- toRepa @DIM1 label
+        label     <- toRepa @DIM2 label
         all_pos   <- Repa.sumAllP $ Repa.map (\w -> if w > 0 then 1 else 0) label
 
         modifyIORef' sumRef (+ realToFrac all_loss)
