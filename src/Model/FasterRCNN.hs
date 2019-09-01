@@ -215,13 +215,13 @@ instance CustomOperation (Operation ProposalTargetProp) where
       where
         toRows2 arr = let Z :. rows :._ = Repa.extent arr
                           range = V.enumFromN (0 :: Int) rows
-                      in V.map (\i -> Repa.slice arr (Z :. i :. All)) range
+                      in V.map (\i -> Repa.computeUnboxedS $ Repa.slice arr (Z :. i :. All)) range
 
         toRows3 arr = let Z :. rows :. _ :. _ = Repa.extent arr
                           range = V.enumFromN (0 :: Int) rows
-                      in V.map (\i -> Repa.slice arr (Z :. i :. All :. All)) range
+                      in V.map (\i -> Repa.computeUnboxedS $ Repa.slice arr (Z :. i :. All :. All)) range
 
-        sample_batch :: V.Vector (Repa.Array _ DIM1 Float) -> V.Vector (Repa.Array _ DIM2 Float) -> Int -> IO (_, _, _, _)
+        sample_batch :: V.Vector (Repa.Array Repa.U DIM1 Float) -> V.Vector (Repa.Array _ DIM2 Float) -> Int -> IO (_, _, _, _)
         sample_batch r_rois r_gt index = do
             let rois_this_image   = V.filter (\roi -> floor (roi #! 0) == index) r_rois
                 all_gt_this_image = toRows2 $ r_gt %! index
@@ -232,7 +232,7 @@ instance CustomOperation (Operation ProposalTargetProp) where
 
             -- WHY?
             -- append gt boxes to rois
-            let prepend_index = (Repa.fromListUnboxed (Z :. 1) [fromIntegral index] Repa.++)
+            let prepend_index = Repa.computeUnboxedS . (Repa.fromListUnboxed (Z :. 1) [fromIntegral index] Repa.++)
                 gt_boxes_as_rois = V.map (\gt -> prepend_index $ Repa.extract (Z :. 0) (Z :. 4) gt) gt_this_image
                 rois_this_image' = rois_this_image V.++ gt_boxes_as_rois
 
@@ -244,8 +244,8 @@ instance CustomOperation (Operation ProposalTargetProp) where
         _set_value_upd [in_grad_1] (#src := 0 .& Nil)
 
 
-sample_rois :: V.Vector (Repa.Array _ DIM1 Float) -> V.Vector (Repa.Array _ DIM1 Float) -> Int -> Int -> Int -> Float -> [Float]
-            -> IO (V.Vector (Repa.Array Repa.D Repa.DIM1 Float),
+sample_rois :: V.Vector (Repa.Array Repa.U DIM1 Float) -> V.Vector (Repa.Array Repa.U DIM1 Float) -> Int -> Int -> Int -> Float -> [Float]
+            -> IO (V.Vector (Repa.Array Repa.U Repa.DIM1 Float),
                    V.Vector Float,
                    Repa.Array _ Repa.DIM2 Float,
                    Repa.Array _ Repa.DIM2 Float)
@@ -257,8 +257,8 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     let num_rois = V.length rois
     -- print(num_rois, V.length gt_boxes)
     -- assert (num_rois == V.length gt_boxes) (return ())
-    let aoi_boxes = V.map (Repa.extract (Z:.1) (Z:.4)) rois
-        gt_boxes  = V.map (Repa.extract (Z:.0) (Z:.4)) gt
+    let aoi_boxes = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois
+        gt_boxes  = V.map (Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt
         overlaps  = Repa.computeUnboxedS $ overlapMatrix aoi_boxes gt_boxes
 
     let maxIndices = argMax overlaps
@@ -284,10 +284,10 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     let keep_indexes = V.map fst $ fg_indexes V.++ bg_indexes
 
         rois_keep    = V.map (rois %!) keep_indexes
-        roi_box_keep = V.map (asTuple . Repa.extract (Z:.1) (Z:.4)) rois_keep
+        roi_box_keep = V.map (asTuple . Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois_keep
 
         gt_keep      = V.map (gt_chosen  %!) keep_indexes
-        gt_box_keep  = V.map (asTuple . Repa.extract (Z:.0) (Z:.4)) gt_keep
+        gt_box_keep  = V.map (asTuple . Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt_keep
         labels_keep  = V.take (length fg_indexes) (V.map (#! 4) gt_keep) V.++ V.replicate bg_rois_this_image 0
 
         targets = V.zipWith (bboxTransform box_stds) roi_box_keep gt_box_keep
@@ -317,7 +317,7 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
   where
     runRVar' = flip runRVar StdRandom
 
-overlapMatrix :: V.Vector (Repa.Array Repa.D Repa.DIM1 Float) -> V.Vector (Repa.Array Repa.D Repa.DIM1 Float) -> Repa.Array Repa.D Repa.DIM2 Float
+overlapMatrix :: V.Vector (Repa.Array Repa.U Repa.DIM1 Float) -> V.Vector (Repa.Array Repa.U Repa.DIM1 Float) -> Repa.Array Repa.D Repa.DIM2 Float
 overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
   where
     width  = length rois
@@ -350,7 +350,7 @@ whctr (x0, y0, x1, y1) = (w, h, x, y)
     x = x0 + 0.5 * (w - 1)
     y = y0 + 0.5 * (h - 1)
 
-asTuple :: Repa.Array Repa.D Repa.DIM1 Float -> (Float, Float, Float, Float)
+asTuple :: Repa.Array Repa.U Repa.DIM1 Float -> (Float, Float, Float, Float)
 asTuple box = (box #! 0, box #! 1, box #! 2, box #! 3)
 
 bboxTransform :: [Float] -> Box -> Box -> Box
@@ -363,7 +363,7 @@ bboxTransform [std0, std1, std2, std3] box1 box2 =
         dh = log (h2 / h1) / std3
     in (dx, dy, dw, dh)
 
-(#!) :: (Shape sh, Repa.Source r e) => Repa.Array r sh e -> Int -> e 
+(#!) :: (Shape sh, UV.Unbox e) => Repa.Array Repa.U sh e -> Int -> e 
 (#!) = Repa.linearIndex
 (%!) = (V.!)
 
@@ -376,11 +376,11 @@ test_sample_rois = let
         v2 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 2.2, 2.2, 4.5, 4.5]
         v3 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 4.2, 1, 6.5, 2.8]
         v4 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 6, 3, 7, 4]
-        rois = V.fromList $ map Repa.delay [v1, v2, v3, v4]
+        rois = V.fromList [v1, v2, v3, v4]
         g1 = Repa.fromListUnboxed (Z:.5::DIM1) [1,1,2,2,1]
         g2 = Repa.fromListUnboxed (Z:.5::DIM1) [2,3,3,4,1]
         g3 = Repa.fromListUnboxed (Z:.5::DIM1) [4,1,6,3,2]
-        gt_boxes = V.fromList $ map Repa.delay [g1, g2, g3]
+        gt_boxes = V.fromList [g1, g2, g3]
       in sample_rois rois gt_boxes 3 6 2 0.5 [0.1, 0.1, 0.1, 0.1]
 
 
@@ -486,7 +486,7 @@ instance EvalMetricMethod RPNLogLossMetric where
         pred  <- toRepa @DIM2 pred
 
         -- mark out labels where value -1
-        let mask = Repa.map (/= -1) label :: Repa.Array _ _ Bool
+        let mask = Repa.computeUnboxedS $ Repa.map (/= -1) label
 
         pred  <- Repa.selectP (mask #!) (\i -> pred  Repa.! (Z :. i :. (floor $ label #! i))) size
         -- traceShowM pred
