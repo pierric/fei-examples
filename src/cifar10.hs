@@ -55,7 +55,7 @@ main = do
               Resnext -> Resnext.symbol
     sess <- initialize net $ Config { 
                 _cfg_data = M.singleton "x" [3,32,32],
-                _cfg_label = M.singleton "y" [1],
+                _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_context = contextGPU0

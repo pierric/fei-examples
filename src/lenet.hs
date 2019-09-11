@@ -37,7 +37,7 @@ main = do
     net  <- Model.symbol
     sess <- initialize net $ Config { 
                 _cfg_data = M.singleton "x" [1,28,28],
-                _cfg_label = M.singleton "y" [1],
+                _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_context = contextGPU0

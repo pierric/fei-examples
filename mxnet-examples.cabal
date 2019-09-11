@@ -89,6 +89,7 @@ Executable rcnn
                       , directory
                       , mtl
                     --   , cuda
+                      , conduit
                       , mxnet-base
                       , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3

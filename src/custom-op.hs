@@ -98,7 +98,7 @@ main = do
 
     sess <- NN.initialize net $ NN.Config {
                 NN._cfg_data = M.singleton "x" [1,28,28],
-                NN._cfg_label = M.singleton "y" [1],
+                NN._cfg_label = ["y"],
                 NN._cfg_initializers = M.empty,
                 NN._cfg_default_initializer = default_initializer,
                 NN._cfg_context = contextCPU
