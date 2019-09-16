@@ -119,7 +119,7 @@ loadWeights weights_path = do
                                        "cls_score_weight",
                                        "cls_score_bias",
                                        "bbox_pred_weight",
-                                       "bbox_pred_bias"]                                       
+                                       "bbox_pred_bias"]
 
 main :: IO ()
 main = do
@@ -169,27 +169,27 @@ main = do
                       .& #batch_size    := rcnn_batch_size
                       .& #shuffle       := True
                       .& Nil)
-    
-    sess <- initialize sym $ Config { 
-        _cfg_data  = M.fromList [("data",        [3, coco_img_short_side, coco_img_long_side]), 
+
+    sess <- initialize sym $ Config {
+        _cfg_data  = M.fromList [("data",        [3, coco_img_short_side, coco_img_long_side]),
                                  ("im_info",     [3]),
                                  ("gt_boxes",    [0, 5])],
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
-        _cfg_context = contextCPU
+        _cfg_context = contextGPU0
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9 
-                                                   .& #wd := 0.0005 
-                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size) 
-                                                   .& #clip_gradient := 5 
+    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
+                                                   .& #wd := 0.0005
+                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+                                                   .& #clip_gradient := 5
                                                    .& Nil)
 
     train sess $ do
         sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
 
         unless (null pretrained_weights) (loadWeights pretrained_weights)
-    
+
         metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
         forM_ [1..40] $ \ ei -> do
             liftIO $ putStrLn $ "Epoch " ++ show ei

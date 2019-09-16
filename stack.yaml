@@ -12,8 +12,7 @@ ghc-options:
 packages:
 - .
 extra-deps:
-- ../mxnet-hs/base
-- ../mxnet-hs/operators
+- ../mxnet-hs
 - ../mxnet-nn
 - ../mxnet-dataiter/dataiter
 - ../mxnet-cocoapi
@@ -33,3 +32,6 @@ extra-include-dirs:
 - /home/jiasen/dschungel/incubator-mxnet-1.5/3rdparty/tvm/nnvm/include/
 extra-lib-dirs:
 - /home/jiasen/dschungel/incubator-mxnet-1.5/lib
+flags:
+  mxnet-base:
+    MXNet_1_5: true

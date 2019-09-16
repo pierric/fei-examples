@@ -30,7 +30,6 @@ Executable lenet
                       , unordered-containers >= 0.2.8
                       , vector >= 0.12
                       , mxnet-base
-                      , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3
                       , mxnet-dataiter
   default-extensions:   OverloadedLabels
@@ -50,7 +49,6 @@ Executable cifar10
                       , optparse-applicative
                       , lens >= 4.12
                       , mxnet-base
-                      , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3
                       , mxnet-dataiter
   default-extensions:   OverloadedLabels
@@ -62,7 +60,6 @@ Executable custom-op
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
                       , mxnet-base
-                      , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3
                       , mxnet-dataiter
                       , unordered-containers >= 0.2.8
@@ -91,7 +88,6 @@ Executable rcnn
                     --   , cuda
                       , conduit
                       , mxnet-base
-                      , mxnet-ops
                       , mxnet-nn >= 0.0.2 && < 0.0.3
                       , mxnet-dataiter
                       , mxnet-cocoapi
