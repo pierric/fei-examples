@@ -12,10 +12,10 @@ ghc-options:
 packages:
 - .
 extra-deps:
-- ../mxnet-hs
-- ../mxnet-nn
-- ../mxnet-dataiter/dataiter
-- ../mxnet-cocoapi
+- ../fei-base
+- ../fei-nn
+- ../fei-dataiter
+- ../fei-cocoapi
 - ../tuple-ops
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
@@ -33,5 +33,5 @@ extra-include-dirs:
 extra-lib-dirs:
 - /home/jiasen/dschungel/incubator-mxnet-1.5/lib
 flags:
-  mxnet-base:
+  fei-base:
     MXNet_1_5: true
