@@ -1,5 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 module Main where
 
 import qualified Data.HashMap.Strict as M
@@ -10,7 +12,7 @@ import Control.Monad.IO.Class
 import Control.Lens ((.=))
 import System.IO (hFlush, stdout)
 import Options.Applicative (
-    Parser, execParser, 
+    Parser, execParser,
     long, value, option, auto, strOption, metavar, showDefault, eitherReader, help,
     info, helper, fullDesc, header, (<**>))
 import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
@@ -19,9 +21,9 @@ import System.Directory (doesFileExist, canonicalizePath)
 
 import MXNet.Base (
     NDArray(..), toVector,
-    contextCPU, contextGPU0, 
+    contextCPU, contextGPU0,
     mxListAllOpNames, mxNotifyShutdown, mxNDArraySave,
-    registerCustomOperator, 
+    registerCustomOperator,
     ndshape,
     listOutputs, internals, inferShape, at', at,
     HMap(..), (.&), ArgOf(..))
@@ -29,7 +31,7 @@ import MXNet.NN
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.DataIter.Coco as Coco
-import MXNet.NN.Utils (loadSession, saveSession)
+import MXNet.NN.Utils (loadStates, saveStates)
 import Model.FasterRCNN
 
 
@@ -42,8 +44,8 @@ data CocoConfig = CocoConfig {
 } deriving Show
 
 cmdArgParser :: Parser (RcnnConfiguration, CocoConfig)
-cmdArgParser = liftA2 (,) 
-                (RcnnConfiguration 
+cmdArgParser = liftA2 (,)
+                (RcnnConfiguration
                     <$> option intList   (long "rpn-anchor-scales" <> metavar "SCALES"         <> showDefault <> value [8,16,32] <> help "rpn anchor scales")
                     <*> option floatList (long "rpn-anchor-ratios" <> metavar "RATIOS"         <> showDefault <> value [0.5,1,2] <> help "rpn anchor ratios")
                     <*> option auto      (long "rpn-feat-stride"   <> metavar "STRIDE"         <> showDefault <> value 16        <> help "rpn feature stride")
@@ -108,9 +110,9 @@ default_initializer name = case name of
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
-    if not e 
-        then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist." 
-        else loadSession weights_path ["rpn_conv_3x3_weight",
+    if not e
+        then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist."
+        else loadStates weights_path ["rpn_conv_3x3_weight",
                                        "rpn_conv_3x3_bias",
                                        "rpn_cls_score_weight",
                                        "rpn_cls_score_bias",
@@ -170,7 +172,7 @@ main = do
                       .& #shuffle       := True
                       .& Nil)
 
-    sess <- initialize sym $ Config {
+    sess <- initialize @"fastrcnn" sym $ Config {
         _cfg_data  = M.fromList [("data",        [3, coco_img_short_side, coco_img_long_side]),
                                  ("im_info",     [3]),
                                  ("gt_boxes",    [0, 5])],
@@ -186,7 +188,7 @@ main = do
                                                    .& Nil)
 
     train sess $ do
-        sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
+        -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
 
         unless (null pretrained_weights) (loadWeights pretrained_weights)
 
@@ -208,7 +210,6 @@ main = do
                     putStrLn $ show i ++ " " ++ eval
                     hFlush stdout
             liftIO $ putStrLn ""
-            saveSession "sav"
 
     -- CUDA.stop
     mxNotifyShutdown

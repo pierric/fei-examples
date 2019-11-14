@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 module Main where
 
 import MXNet.Base
@@ -96,7 +98,7 @@ main = do
     registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- symbol
 
-    sess <- NN.initialize net $ NN.Config {
+    sess <- NN.initialize @"lenet" net $ NN.Config {
                 NN._cfg_data = M.singleton "x" [1,28,28],
                 NN._cfg_label = ["y"],
                 NN._cfg_initializers = M.empty,
@@ -107,12 +109,12 @@ main = do
 
     NN.train sess $ do
 
-        let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte" .&
-                                      #label := "data/train-labels-idx1-ubyte" .&
-                                      #batch_size := 128 .& Nil)
-        let testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte" .&
-                                      #label := "data/t10k-labels-idx1-ubyte" .&
-                                      #batch_size := 16  .& Nil)
+        let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
+                                   .& #label := "data/train-labels-idx1-ubyte"
+                                   .& #batch_size := 128 .& Nil)
+        let testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte"
+                                   .& #label := "data/t10k-labels-idx1-ubyte"
+                                   .& #batch_size := 16  .& Nil)
 
         total1 <- sizeD trainingData
         liftIO $ putStrLn $ "[Train] "
@@ -134,7 +136,7 @@ main = do
             liftIO $ do
                 putStr $ "\r\ESC[K" ++ show i ++ "/" ++ show total2
                 hFlush stdout
-            [y'] <- NN.forwardOnly (M.fromList [("x", Just x), ("y", Nothing)])
+            [y'] <- NN.forwardOnly (M.singleton "x" x)
             ind1 <- liftIO $ toVector y
             ind2 <- liftIO $ argmax y' >>= toVector
             return (ind1, ind2)
