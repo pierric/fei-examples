@@ -14,7 +14,6 @@ packages:
 extra-deps:
 - ../fei-base
 - ../fei-nn
-- ../fei-dataiter
 - ../fei-cocoapi
 - ../tuple-ops
 - git: https://github.com/0xCM/type-combinators.git
@@ -29,7 +28,6 @@ extra-deps:
 - cuda-0.10.1.0
 extra-include-dirs:
 - /home/jiasen/dschungel/incubator-mxnet-1.5/include
-- /home/jiasen/dschungel/incubator-mxnet-1.5/3rdparty/tvm/nnvm/include/
 extra-lib-dirs:
 - /home/jiasen/dschungel/incubator-mxnet-1.5/lib
 flags:
