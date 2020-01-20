@@ -19,7 +19,7 @@ import MXNet.NN.DataIter.Conduit
 import qualified Model.Lenet as Model
 
 type ArrayF = NDArray Float
-type DS = ConduitData (Module "lenet" Float) (ArrayF, ArrayF)
+type DS = ConduitData (Module "lenet" Float IO) (ArrayF, ArrayF)
 
 range :: Int -> [Int]
 range = enumFromTo 1

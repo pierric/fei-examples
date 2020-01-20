@@ -83,6 +83,7 @@ Executable rcnn
                       , directory
                       , mtl
                       , conduit
+                      , resourcet
                       , fei-base
                       , fei-nn
                       , fei-cocoapi

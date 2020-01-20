@@ -5,11 +5,12 @@
 module Main where
 
 import qualified Data.HashMap.Strict as M
-import Control.Monad (forM_, void, unless)
+import Control.Monad (forM_, void, unless, when)
 import Control.Applicative (liftA2)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
-import Control.Lens ((.=))
+import Control.Monad.Trans.Resource
+import Control.Lens ((.=), use)
 import System.IO (hFlush, stdout)
 import Options.Applicative (
     Parser, execParser,
@@ -18,9 +19,10 @@ import Options.Applicative (
 import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
 import qualified Data.Text as T
 import System.Directory (doesFileExist, canonicalizePath)
+import Text.Printf (printf)
 
 import MXNet.Base (
-    NDArray(..), toVector,
+    NDArray(..), toVector, execForward,
     contextCPU, contextGPU0,
     mxListAllOpNames, mxNotifyShutdown, mxNDArraySave,
     registerCustomOperator,
@@ -34,11 +36,14 @@ import MXNet.NN.DataIter.Coco as Coco
 import MXNet.NN.Utils (loadStates, saveStates)
 import Model.FasterRCNN
 
+import qualified Data.Array.Repa as Repa
+import qualified Data.Vector as V
+import Debug.Trace
+
 
 data CocoConfig = CocoConfig {
     coco_base_path       :: String,
-    coco_img_short_side  :: Int,
-    coco_img_long_side   :: Int,
+    coco_img_size        :: Int,
     coco_img_pixel_means :: [Float],
     coco_img_pixel_stds  :: [Float]
 } deriving Show
@@ -69,8 +74,7 @@ cmdArgParser = liftA2 (,)
                     <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model"))
                 (CocoConfig
                     <$> strOption        (long "coco" <> metavar "PATH" <> help "path to the coco dataset")
-                    <*> option auto      (long "img-short-side"    <> metavar "SIZE" <> showDefault <> value 600  <> help "short side of image")
-                    <*> option auto      (long "img-long-side"     <> metavar "SIZE" <> showDefault <> value 1000 <> help "long side of image")
+                    <*> option auto      (long "img-size"          <> metavar "SIZE" <> showDefault <> value 1024 <> help "long side of image")
                     <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN" <> showDefault <> value [0,0,0] <> help "RGB mean of images")
                     <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS" <> showDefault <> value [1,1,1] <> help "RGB std-dev of images"))
   where
@@ -131,31 +135,11 @@ main = do
     sym  <- symbolTrain rcnn_conf
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
-    let extr_feature_shape (w, h) = do
-            -- get the feature (width, height) at the top of feature extraction.
-            (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3,w, h])]
-            return (feat_width, feat_height)
-
-    -- Coco x y inst <- coco coco_base_path "train2017"
-    -- let coco_inst = Coco x y (inst & images %~ V.filter (\img_desc -> (img_desc ^. img_id) `elem` [97733])) -- , 123980, 111549]))
-    -- let data_iter = cocoImagesWithAnchors' (cocoImages coco_inst False) extr_feature_shape
-    --                     (#anchor_scales := rpn_anchor_scales
-    --                   .& #anchor_ratios := rpn_anchor_ratios
-    --                   .& #batch_rois    := rpn_batch_rois
-    --                   .& #feature_stride:= rpn_feature_stride
-    --                   .& #allowed_border:= rpn_allowd_border
-    --                   .& #fg_fraction   := rpn_fg_fraction
-    --                   .& #fg_overlap    := rpn_fg_overlap
-    --                   .& #bg_overlap    := rpn_bg_overlap
-    --                   .& #short_size    := coco_img_short_side
-    --                   .& #long_size     := coco_img_long_side
-    --                   .& #mean          := toTriple coco_img_pixel_means
-    --                   .& #std           := toTriple coco_img_pixel_stds
-    --                   .& #batch_size    := rcnn_batch_size
-    --                   .& Nil)
+    -- get the feature (width, height) at the top of feature extraction.
+    (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3, coco_img_size, coco_img_size])]
 
     coco_inst <- coco coco_base_path "train2017"
-    let data_iter = cocoImagesWithAnchors coco_inst extr_feature_shape
+    let data_iter = cocoImagesWithAnchors coco_inst
                         (#anchor_scales := rpn_anchor_scales
                       .& #anchor_ratios := rpn_anchor_ratios
                       .& #batch_rois    := rpn_batch_rois
@@ -164,16 +148,17 @@ main = do
                       .& #fg_fraction   := rpn_fg_fraction
                       .& #fg_overlap    := rpn_fg_overlap
                       .& #bg_overlap    := rpn_bg_overlap
-                      .& #short_size    := coco_img_short_side
-                      .& #long_size     := coco_img_long_side
                       .& #mean          := toTriple coco_img_pixel_means
                       .& #std           := toTriple coco_img_pixel_stds
                       .& #batch_size    := rcnn_batch_size
+                      .& #image_size    := coco_img_size
+                      .& #feature_width := feat_width
+                      .& #feature_height:= feat_height
                       .& #shuffle       := True
                       .& Nil)
 
     sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        [3, coco_img_short_side, coco_img_long_side]),
+        _cfg_data  = M.fromList [("data",        [3, coco_img_size, coco_img_size]),
                                  ("im_info",     [3]),
                                  ("gt_boxes",    [0, 5])],
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
@@ -181,35 +166,34 @@ main = do
         _cfg_default_initializer = default_initializer,
         _cfg_context = contextGPU0
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
+    optimizer <- makeOptimizer SGD'Mom (Const 0.01) (#momentum := 0.9
                                                    .& #wd := 0.0005
                                                    .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
                                                    .& #clip_gradient := 5
                                                    .& Nil)
 
-    train sess $ do
+    runResourceT $ train sess $ do
         -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
-
         unless (null pretrained_weights) (loadWeights pretrained_weights)
-
         metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
-        forM_ [1..40] $ \ ei -> do
+        forM_ [1..40::Int] $ \ ei -> do
             liftIO $ putStrLn $ "Epoch " ++ show ei
             liftIO $ hFlush stdout
-            let dd = takeD 200 data_iter
-            void $ forEachD_i  dd $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
+            void $ forEachD_i (liftD $ takeD 10 data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
                 let binding = M.fromList [ ("data",        x0)
                                          , ("im_info",     x1)
                                          , ("gt_boxes",    x2)
                                          , ("label",       y0)
                                          , ("bbox_target", y1)
                                          , ("bbox_weight", y2) ]
+
                 fitAndEval optimizer binding metric
                 eval <- format metric
                 liftIO $ do
                     putStrLn $ show i ++ " " ++ eval
                     hFlush stdout
+
+            saveStates (ei == 1) (printf "checkpoints/faster_rcnn_epoch_%03d" ei)
             liftIO $ putStrLn ""
 
-    -- CUDA.stop
     mxNotifyShutdown

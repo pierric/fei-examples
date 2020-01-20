@@ -363,7 +363,7 @@ bboxTransform [std0, std1, std2, std3] box1 box2 =
         dh = log (h2 / h1) / std3
     in (dx, dy, dw, dh)
 
-(#!) :: (Shape sh, UV.Unbox e) => Repa.Array Repa.U sh e -> Int -> e 
+(#!) :: (Shape sh, UV.Unbox e) => Repa.Array Repa.U sh e -> Int -> e
 (#!) = Repa.linearIndex
 (%!) = (V.!)
 
@@ -441,7 +441,7 @@ instance EvalMetricMethod RCNNAccMetric where
 
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
-        
+
         pred_class <- toRepa @DIM2 (NDArray pred_class)
         label <- toRepa @DIM2 label
 
@@ -473,7 +473,7 @@ instance EvalMetricMethod RPNLogLossMetric where
     evaluate (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
         let cls_prob = outputs !! cindex
             label    = bindings M.! lname
-    
+
         -- (batch_size, #num_anchors*feat_w*feat_h) to (batch_size*#num_anchors*feat_w*feat_h,)
         label <- A.reshape label [-1]
         label <- toRepa @DIM1 label
@@ -494,7 +494,7 @@ instance EvalMetricMethod RPNLogLossMetric where
 
         let pred_with_ep = Repa.map ((0 -) . log)  (pred Repa.+^ constant (Z :. size) 1e-14)
         cls_loss <- Repa.foldP (+) 0 pred_with_ep
-        
+
         let cls_loss_val = realToFrac (cls_loss #! 0)
         modifyIORef' sumRef (+ cls_loss_val)
         modifyIORef' cntRef (+ size)
@@ -524,8 +524,8 @@ instance EvalMetricMethod RCNNLogLossMetric where
 
         cls_prob <- toRepa @DIM3 cls_prob
         label    <- toRepa @DIM2 label
-        
-        let lbl_shp@(Z :. _ :. size) = Repa.extent label 
+
+        let lbl_shp@(Z :. _ :. size) = Repa.extent label
             cls = Repa.fromFunction lbl_shp (\ pos@(Z :. bi :. ai) -> cls_prob Repa.! (Z :. bi :. ai :. (floor $ label Repa.! pos)))
 
         cls_loss_val <- Repa.sumAllP $ Repa.map (\v -> - log(1e-14 + v)) cls

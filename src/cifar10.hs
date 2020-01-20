@@ -23,7 +23,7 @@ import qualified Model.Resnet as Resnet
 import qualified Model.Resnext as Resnext
 
 type ArrayF = NDArray Float
-type DS = StreamData (Module "cifar10" Float) (ArrayF, ArrayF)
+type DS = StreamData (Module "cifar10" Float IO) (ArrayF, ArrayF)
 
 data Model   = Resnet | Resnext deriving (Show, Read)
 data ProgArg = ProgArg Model
