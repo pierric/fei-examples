@@ -25,11 +25,15 @@ extra-deps:
 - streaming-utils-0.1.4.7
 - graphviz-2999.20.0.3
 - unordered-containers-0.2.10.0
-- cuda-0.10.1.0
+- conduit-concurrent-map-0.1.1
+- hip-1.5.4.0
+- Chart-1.9
+- Chart-diagrams-1.9
+- SVGFonts-1.6.0.3
 extra-include-dirs:
-- /home/jiasen/dschungel/incubator-mxnet-1.5/include
+- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/include
 extra-lib-dirs:
-- /home/jiasen/dschungel/incubator-mxnet-1.5/lib
+- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/lib
 flags:
   fei-base:
     MXNet_1_5: true
