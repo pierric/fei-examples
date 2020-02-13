@@ -67,7 +67,8 @@ Executable custom-op
 Executable rcnn
   main-is:             rcnn.hs
   other-modules:       Model.VGG,
-                       Model.FasterRCNN
+                       Model.FasterRCNN,
+                       DataIter.Coco
   hs-source-dirs:      src
   ghc-options:          -Wall
   default-language:     Haskell2010
@@ -84,9 +85,12 @@ Executable rcnn
                       , mtl
                       , conduit
                       , resourcet
+                      , deepseq
                       , fei-base
                       , fei-nn
                       , fei-cocoapi
+                      , fei-datasets
   default-extensions:   OverloadedLabels
                       , TypeFamilies
+                      , FlexibleContexts
 
