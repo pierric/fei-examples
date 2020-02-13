@@ -151,6 +151,57 @@ symbolTrain RcnnConfiguration{..} =  do
 
     Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG, topFeatuSG, clsScoreSG]
 
+
+symbolInf :: RcnnConfiguration -> IO (Symbol Float)
+symbolInf RcnnConfiguration{..} = do
+    let numAnchors = length rpn_anchor_scales * length rpn_anchor_ratios
+    -- dat:
+    dat <- variable "data"
+    -- imInfo:
+    imInfo <- variable "im_info"
+
+    -- VGG-15 without the last pooling layer
+    convFeat <- VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
+
+    rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
+    rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
+
+    ---------------------------
+    -- rpn_clas_prob part
+    --
+    -- per pixel: fore/back-ground classification
+    rpnClsScore <- convolution "rpn_cls_score" (#data := rpnRelu .& #kernel := [1,1] .& #pad := [0,0] .& #num_filter := 2 * numAnchors .& Nil)
+    rpnClsScoreReshape <- reshape "rpn_cls_score_reshape" (#data := rpnClsScore .& #shape := [0, 2, -1, 0] .& Nil)
+    rpnClsAct <- softmax "rpn_cls_act" (#data := rpnClsScoreReshape .& #axis := 1 .& Nil)
+    rpnClsActReshape <- reshape "rpn_cls_act_reshape" (#data := rpnClsAct .& #shape := [0, 2 * numAnchors, -1, 0] .& Nil)
+
+    ---------------------------
+    -- rpn_bbox part
+    rpnBBoxPred <- convolution "rpn_bbox_pred" (#data := rpnRelu .& #kernel := [1,1] .& #pad := [0,0] .& #num_filter := 4 * numAnchors .& Nil)
+
+    ---------------------------
+    rois <- _contrib_MultiProposal "rois" (#cls_prob := rpnClsActReshape .& #bbox_pred := rpnBBoxPred .& #im_info := imInfo
+                                        .& #feature_stride := rpn_feature_stride .& #scales := map fromIntegral rpn_anchor_scales .& #ratios := rpn_anchor_ratios
+                                        .& #rpn_pre_nms_top_n := rpn_pre_topk .& #rpn_post_nms_top_n := rpn_post_topk
+                                        .& #threshold := rpn_nms_thresh .& #rpn_min_size := rpn_min_size .& Nil)
+
+    ---------------------------
+    -- cls_prob part
+    --
+    roiPool <- _ROIPooling "roi_pool" (#data := convFeat .& #rois := rois
+                                    .& #pooled_size := rcnn_pooled_size
+                                    .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
+    topFeat <- VGG.getTopFeature Nothing roiPool
+    clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
+    clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
+
+    ---------------------------
+    -- bbox_loss part
+    --
+    bboxPred <- fullyConnected "bbox_pred" (#data := topFeat .& #num_hidden := 4 * rcnn_num_classes .& Nil)
+
+    Symbol <$> group [rois, clsProb, bboxPred]
+
 --------------------------------
 
 data ProposalTargetProp = ProposalTargetProp {
