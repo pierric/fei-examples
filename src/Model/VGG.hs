@@ -22,7 +22,7 @@ getFeature internalLayer layers filters with_batch_norm with_last_pooling= do
     last_group:groups = reverse $ zip3 [1::Int ..] layers filters
     specs = reverse groups
 
-    build1 sym (idx, num, filter) = do 
+    build1 sym (idx, num, filter) = do
         sym <- foldM (build2 idx) sym $ zip [1::Int ..] (replicate num filter)
         pooling (printf "pool%d" idx) (#data := sym .& #pool_type := #max .& #kernel := [2,2] .& #stride := [2,2] .& Nil)
 
@@ -57,7 +57,7 @@ symbol num_classes num_layers with_batch_norm = do
     sym <- softmaxoutput "softmax" (#data := sym .& Nil)
     return (Symbol sym)
 
-  where  
+  where
     (layers, filters) = case num_layers of
                             11 -> ([1, 1, 2, 2, 2], [64, 128, 256, 512, 512])
                             13 -> ([2, 2, 2, 2, 2], [64, 128, 256, 512, 512])

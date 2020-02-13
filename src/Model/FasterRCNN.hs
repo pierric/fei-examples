@@ -127,7 +127,7 @@ symbolTrain RcnnConfiguration{..} =  do
     roiPool <- _ROIPooling "roi_pool" (#data := convFeat .& #rois := rois
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
-    topFeat <- VGG.getTopFeature (Just "rcnn_") roiPool
+    topFeat <- VGG.getTopFeature Nothing roiPool
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
 
@@ -145,7 +145,11 @@ symbolTrain RcnnConfiguration{..} =  do
     bboxLossReshape <- reshape "bbox_loss_reshape" (#data := bboxLoss .& #shape := [rcnn_batch_size, -1, 4 * rcnn_num_classes] .& Nil)
     labelSG <- _BlockGrad "label_sg" (#data := labelReshape .& Nil)
 
-    Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG]
+    -- include topFeatures and clsScores for debug
+    topFeatuSG <- _BlockGrad "topfeatu_sg" (#data := topFeat .& Nil)
+    clsScoreSG <- _BlockGrad "clsscore_sg" (#data := clsScore .& Nil)
+
+    Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG, topFeatuSG, clsScoreSG]
 
 --------------------------------
 
@@ -442,6 +446,15 @@ instance EvalMetricMethod RCNNAccMetric where
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
 
+        -- debug only
+        s1 <- ndshape (NDArray pred_class :: NDArray Float)
+        v1 <- toVector (NDArray pred_class :: NDArray Float)
+        print (s1, SV.map floor v1 :: SV.Vector Int)
+
+        s1 <- ndshape label
+        v1 <- toVector label
+        print (s1, SV.map floor v1 :: SV.Vector Int)
+
         pred_class <- toRepa @DIM2 (NDArray pred_class)
         label <- toRepa @DIM2 label
 
@@ -468,7 +481,7 @@ instance EvalMetricMethod RPNLogLossMetric where
     format (RPNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RPNLogLoss: %0.3f>" (realToFrac s / fromIntegral n :: Float)
+        return $ printf "<RPNLogLoss: %0.4f>" (realToFrac s / fromIntegral n :: Float)
 
     evaluate (RPNLogLossMetricData phase cindex lname cntRef sumRef) bindings outputs = liftIO $  do
         let cls_prob = outputs !! cindex
@@ -516,7 +529,7 @@ instance EvalMetricMethod RCNNLogLossMetric where
     format (RCNNLogLossMetricData _ _ _ cntRef sumRef) = liftIO $ do
         s <- liftIO $ readIORef sumRef
         n <- liftIO $ readIORef cntRef
-        return $ printf "<RCNNLogLoss: %0.3f>" (realToFrac s / fromIntegral n :: Float)
+        return $ printf "<RCNNLogLoss: %0.4f>" (realToFrac s / fromIntegral n :: Float)
 
     evaluate (RCNNLogLossMetricData phase cindex lindex cntRef sumRef) bindings outputs = liftIO $  do
         let cls_prob = outputs !! cindex
