@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Model.FasterRCNN where
 
 import qualified Data.Vector as V
@@ -25,6 +26,7 @@ import Control.Monad (replicateM, forM_, join)
 import Control.Monad.IO.Class (liftIO)
 import Text.Printf (printf)
 import Data.Store (encode)
+import qualified Data.Store as S
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd, argmax, argmax_channel)
@@ -39,6 +41,23 @@ import qualified Model.VGG as VGG
 
 import Debug.Trace
 import qualified Data.ByteString as BS
+
+instance (UVM.Unbox a, S.Store (UV.Vector a), Repa.Shape sh) => S.Store (Repa.Array Repa.U sh a) where
+    size = S.VarSize $ \a ->
+            let shape = Repa.listOfShape (Repa.extent a)
+                vec = Repa.toUnboxed a
+                S.VarSize sz = S.size :: S.Size ([Int], UV.Vector a)
+            in sz (shape, vec)
+
+    peek = do
+        (shape, vec) <- S.peek
+        return $ Repa.fromUnboxed (Repa.shapeOfList shape) vec
+
+    poke a = S.poke (shape, vec)
+      where
+        shape = Repa.listOfShape (Repa.extent a)
+        vec = Repa.toUnboxed a
+
 
 data RcnnConfiguration = RcnnConfiguration {
     rpn_anchor_scales :: [Int],
@@ -328,6 +347,8 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     let aoi_boxes = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois
         gt_boxes  = V.map (Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt
         overlaps  = Repa.computeUnboxedS $ overlapMatrix aoi_boxes gt_boxes
+
+    BS.writeFile "overlaps.store" $ S.encode overlaps
 
     let maxIndices = argMax overlaps
         gt_chosen  = V.map (gt %!) maxIndices
