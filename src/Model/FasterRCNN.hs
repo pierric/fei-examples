@@ -24,6 +24,7 @@ import Control.Lens ((^.), makeLenses)
 import Control.Monad (replicateM, forM_, join)
 import Control.Monad.IO.Class (liftIO)
 import Text.Printf (printf)
+import Data.Store (encode)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd, argmax, argmax_channel)
@@ -37,6 +38,7 @@ import MXNet.NN.EvalMetric
 import qualified Model.VGG as VGG
 
 import Debug.Trace
+import qualified Data.ByteString as BS
 
 data RcnnConfiguration = RcnnConfiguration {
     rpn_anchor_scales :: [Int],
@@ -148,6 +150,9 @@ symbolTrain RcnnConfiguration{..} =  do
     -- include topFeatures and clsScores for debug
     topFeatuSG <- _BlockGrad "topfeatu_sg" (#data := topFeat .& Nil)
     clsScoreSG <- _BlockGrad "clsscore_sg" (#data := clsScore .& Nil)
+    -- roisSG     <- _BlockGrad "rois_sg"     (#data := rois.& Nil)
+    -- bboxTSG    <- _BlockGrad "bboxT_sg"    (#data := bboxTarget .& Nil)
+    -- bboxWSG    <- _BlockGrad "bboxW_sg"    (#data := bboxWeight .& Nil)
 
     Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG, topFeatuSG, clsScoreSG]
 
@@ -193,7 +198,7 @@ symbolInf RcnnConfiguration{..} = do
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
     topFeat <- VGG.getTopFeature Nothing roiPool
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
-    clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
+    clsProb <- softmax "cls_prob" (#data := clsScore .& Nil)
 
     ---------------------------
     -- bbox_loss part
@@ -241,6 +246,9 @@ instance CustomOperation (Operation ProposalTargetProp) where
             [rois_output, label_output, bbox_target_output, bbox_weight_output] = outputs
             batch_size = prop ^. batch_images
 
+        BS.writeFile "rois.store" $ encode (NDArray rois :: NDArray Float)
+        BS.writeFile "gt_boxes.store" $ encode (NDArray gt_boxes :: NDArray Float)
+
         -- convert NDArray to Vector of Repa array.
         r_rois   <- toRepa @DIM2 (NDArray rois)     >>= return . toRows2
         r_gt     <- toRepa @DIM3 (NDArray gt_boxes) >>= return . toRows3
@@ -266,6 +274,11 @@ instance CustomOperation (Operation ProposalTargetProp) where
         copyFromRepa bbox_target_output_nd bbox_targets'
         copyFromRepa bbox_weight_output_nd bbox_weights'
         copyFromVector label_output_nd $ V.convert labels'
+
+        BS.writeFile "rois_o.store" $ encode rois_output_nd
+        BS.writeFile "bbox_target.store" $ encode bbox_target_output_nd
+        BS.writeFile "bbox_weight.store" $ encode bbox_weight_output_nd
+        BS.writeFile "label_o.store" $ encode label_output_nd
 
       where
         toRows2 arr = let Z :. rows :._ = Repa.extent arr
