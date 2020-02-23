@@ -86,6 +86,8 @@ Executable rcnn
                       , conduit
                       , resourcet
                       , deepseq
+                      , store
+                      , bytestring
                       , fei-base
                       , fei-nn
                       , fei-cocoapi

@@ -5,6 +5,7 @@
 module Main where
 
 import qualified Data.HashMap.Strict as M
+import qualified Data.HashSet as S
 import Control.Monad (forM_, void, unless, when)
 import Control.Applicative (liftA2)
 import qualified Data.Vector.Storable as SV
@@ -170,7 +171,8 @@ main = do
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
-        _cfg_context = contextGPU0
+        _cfg_fixed_params = S.fromList [],
+        _cfg_context = contextCPU
     }
     optimizer <- makeOptimizer SGD'Mom (Const 0.0000001) (#momentum := 0.9
                                                    .& #wd := 0.0005
