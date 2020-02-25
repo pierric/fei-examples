@@ -246,9 +246,6 @@ instance CustomOperation (Operation ProposalTargetProp) where
             [rois_output, label_output, bbox_target_output, bbox_weight_output] = outputs
             batch_size = prop ^. batch_images
 
-        BS.writeFile "rois.store" $ encode (NDArray rois :: NDArray Float)
-        BS.writeFile "gt_boxes.store" $ encode (NDArray gt_boxes :: NDArray Float)
-
         -- convert NDArray to Vector of Repa array.
         r_rois   <- toRepa @DIM2 (NDArray rois)     >>= return . toRows2
         r_gt     <- toRepa @DIM3 (NDArray gt_boxes) >>= return . toRows3
@@ -274,11 +271,6 @@ instance CustomOperation (Operation ProposalTargetProp) where
         copyFromRepa bbox_target_output_nd bbox_targets'
         copyFromRepa bbox_weight_output_nd bbox_weights'
         copyFromVector label_output_nd $ V.convert labels'
-
-        BS.writeFile "rois_o.store" $ encode rois_output_nd
-        BS.writeFile "bbox_target.store" $ encode bbox_target_output_nd
-        BS.writeFile "bbox_weight.store" $ encode bbox_weight_output_nd
-        BS.writeFile "label_o.store" $ encode label_output_nd
 
       where
         toRows2 arr = let Z :. rows :._ = Repa.extent arr
