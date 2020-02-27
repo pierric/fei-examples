@@ -24,6 +24,7 @@ import Control.Lens ((^.), makeLenses)
 import Control.Monad (replicateM, forM_, join)
 import Control.Monad.IO.Class (liftIO)
 import Text.Printf (printf)
+import Data.Store (encode)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd, argmax, argmax_channel)
@@ -37,6 +38,7 @@ import MXNet.NN.EvalMetric
 import qualified Model.VGG as VGG
 
 import Debug.Trace
+import qualified Data.ByteString as BS
 
 data RcnnConfiguration = RcnnConfiguration {
     rpn_anchor_scales :: [Int],
@@ -148,6 +150,9 @@ symbolTrain RcnnConfiguration{..} =  do
     -- include topFeatures and clsScores for debug
     topFeatuSG <- _BlockGrad "topfeatu_sg" (#data := topFeat .& Nil)
     clsScoreSG <- _BlockGrad "clsscore_sg" (#data := clsScore .& Nil)
+    -- roisSG     <- _BlockGrad "rois_sg"     (#data := rois.& Nil)
+    -- bboxTSG    <- _BlockGrad "bboxT_sg"    (#data := bboxTarget .& Nil)
+    -- bboxWSG    <- _BlockGrad "bboxW_sg"    (#data := bboxWeight .& Nil)
 
     Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG, topFeatuSG, clsScoreSG]
 
