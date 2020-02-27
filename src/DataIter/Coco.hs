@@ -131,9 +131,10 @@ toNDArray dat = liftIO $ do
         let hdls = map unNDArray arrs
         NDArray . head <$> stack (#data := hdls .& #num_args := length hdls .& Nil)
 
-    repaToNDArray :: Repa.Shape sh => Array U sh Float -> IO (NDArray Float)
-    repaToNDArray arr = do
-        let sh = reverse $ Repa.listOfShape $ Repa.extent arr
-        fromVector sh $ SV.convert $ Repa.toUnboxed arr
-
     convertToMX arr = mapM repaToNDArray arr >>= stackList
+
+repaToNDArray :: Repa.Shape sh => Array U sh Float -> IO (NDArray Float)
+repaToNDArray arr = do
+    let sh = reverse $ Repa.listOfShape $ Repa.extent arr
+    fromVector sh $ SV.convert $ Repa.toUnboxed arr
+
