@@ -152,8 +152,8 @@ symbolTrain RcnnConfiguration{..} =  do
     Symbol <$> group [rpnClsProb, rpnBBoxLoss, clsProbReshape, bboxLossReshape, labelSG, topFeatuSG, clsScoreSG]
 
 
-symbolInf :: RcnnConfiguration -> IO (Symbol Float)
-symbolInf RcnnConfiguration{..} = do
+symbolInfer :: RcnnConfiguration -> IO (Symbol Float)
+symbolInfer RcnnConfiguration{..} = do
     let numAnchors = length rpn_anchor_scales * length rpn_anchor_ratios
     -- dat:
     dat <- variable "data"
@@ -193,7 +193,7 @@ symbolInf RcnnConfiguration{..} = do
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
     topFeat <- VGG.getTopFeature Nothing roiPool
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
-    clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
+    clsProb <- softmax "cls_prob" (#data := clsScore .& Nil)
 
     ---------------------------
     -- bbox_loss part

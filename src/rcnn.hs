@@ -5,18 +5,20 @@
 module Main where
 
 import qualified Data.HashMap.Strict as M
+import qualified Data.HashSet as S
+import Control.Exception.Base (throw)
 import Control.Monad (forM_, void, unless, when)
 import Control.Applicative (liftA2)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 import Control.Monad.Reader
-import Control.Lens ((.=), use)
+import Control.Lens ((.=), (^.), use)
 import System.IO (hFlush, stdout)
 import Options.Applicative (
     Parser, execParser,
     long, value, option, auto, strOption, metavar, showDefault, eitherReader, help,
-    info, helper, fullDesc, header, (<**>))
+    info, helper, fullDesc, header, (<**>), switch)
 import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
 import qualified Data.Text as T
 import Data.Conduit
@@ -32,27 +34,33 @@ import MXNet.Base (
     ndshape,
     listOutputs, internals, inferShape, at', at,
     HMap(..), (.&), ArgOf(..))
-import MXNet.NN
+import MXNet.Coco.Types (img_id, images)
+import MXNet.NN hiding (reshape) 
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.Utils (loadState, saveState)
+import MXNet.NN.NDArray (reshape)
 import Model.FasterRCNN
 import qualified DataIter.Coco as Coco
 import qualified MXNet.NN.DataIter.Coco as Coco
 
 import qualified Data.Array.Repa as Repa
 import qualified Data.Vector as V
+import MXNet.Base (execGetOutputs)
+import Control.Lens ((%=))
 import Debug.Trace
 
 
-data DatasetConfig = DatasetConfig {
+data ProgConfig = ProgConfig {
     ds_base_path       :: String,
     ds_img_size        :: Int,
     ds_img_pixel_means :: [Float],
-    ds_img_pixel_stds  :: [Float]
+    ds_img_pixel_stds  :: [Float],
+    pg_infer           :: Bool,
+    pg_infer_image_id  :: Int
 } deriving Show
 
-cmdArgParser :: Parser (RcnnConfiguration, DatasetConfig)
+cmdArgParser :: Parser (RcnnConfiguration, ProgConfig)
 cmdArgParser = liftA2 (,)
                 (RcnnConfiguration
                     <$> option intList   (long "rpn-anchor-scales" <> metavar "SCALES"         <> showDefault <> value [8,16,32] <> help "rpn anchor scales")
@@ -76,11 +84,13 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"     <> showDefault <> value 0.5       <> help "rcnn foreground iou threshold")
                     <*> option floatList (long "rcnn-bbox-stds"    <> metavar "BBOX-STDDEV"    <> showDefault <> value [0.1, 0.1, 0.2, 0.2] <> help "standard deviation of bbox")
                     <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model"))
-                (DatasetConfig
+                (ProgConfig
                     <$> strOption        (long "base" <> metavar "PATH" <> help "path to the dataset")
                     <*> option auto      (long "img-size"          <> metavar "SIZE" <> showDefault <> value 1024 <> help "long side of image")
                     <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN" <> showDefault <> value [0,0,0] <> help "RGB mean of images")
-                    <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS" <> showDefault <> value [1,1,1] <> help "RGB std-dev of images"))
+                    <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS" <> showDefault <> value [1,1,1] <> help "RGB std-dev of images")
+                    <*> switch           (long "inference" <> showDefault <> help "do inference")
+                    <*> option auto      (long "inference-img-id" <> value 0 <> help "image id"))
   where
     list obj  = parseOnly (sepBy obj (char ',') <* endOfInput) . T.pack
     floatList = eitherReader $ list rational
@@ -102,7 +112,7 @@ toTriple x = error (show x)
 
 
 default_initializer :: Initializer Float
-default_initializer name = trace name $ case name of
+default_initializer name = case name of
     "rpn_conv_3x3_weight"  -> normal 0.01 name
     "rpn_conv_3x3_bias"    -> zeros name
     "rpn_cls_score_weight" -> normal 0.01 name
@@ -135,7 +145,63 @@ main :: IO ()
 main = do
     _    <- mxListAllOpNames
     registerCustomOperator ("proposal_target", buildProposalTargetProp)
-    (rcnn_conf@RcnnConfiguration{..}, DatasetConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+    (rcnn_conf, pg_conf@ProgConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
+    if pg_infer then
+        mainInfer rcnn_conf pg_conf
+    else
+        mainTrain rcnn_conf pg_conf
+    mxNotifyShutdown
+
+mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
+    sym <- symbolInfer rcnn_conf
+    coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
+    sess <- initialize @"fastrcnn" sym $ Config {
+        _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
+                                 ("im_info",     [3])],
+        _cfg_label = [],
+        _cfg_initializers = M.empty,
+        _cfg_default_initializer = default_initializer,
+        _cfg_fixed_params = S.fromList [
+            "conv1_1_weight",
+            "conv1_1_bias",
+            "conv1_2_weight",
+            "conv1_2_bias",
+            "conv2_1_weight",
+            "conv2_1_bias",
+            "conv2_2_weight",
+            "conv2_2_bias"],
+        _cfg_context = contextGPU0
+    }
+    let vimg = V.filter (\img -> img ^. img_id == pg_infer_image_id) $ coco_inst_ ^. images
+        img = V.head vimg
+
+    when (V.null vimg) (throw $ userError $ "image_id " ++ show pg_infer_image_id ++ " not found in val2017")
+
+    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTuple ds_img_pixel_means) (toTuple ds_img_pixel_stds)
+    runResourceT $ flip runReaderT coco_conf $ train sess $ do
+        Just (img_ident, img_tensor, img_info) <- Coco.loadImage img
+        img_tensor <- liftIO $ Coco.repaToNDArray img_tensor
+        img_info   <- liftIO $ Coco.repaToNDArray img_info
+
+        img_tensor <- liftIO $ ndshape img_tensor >>= reshape img_tensor . (1:)
+        img_info   <- liftIO $ ndshape img_info   >>= reshape img_info   . (1:)
+
+        checkpoint <- lastSavedState "checkpoints"
+        case checkpoint of
+            Nothing -> do
+                throw $ userError "Checkpoint not found."
+            Just filename -> do
+                loadState filename []
+                let binding = M.fromList [ ("data",    img_tensor)
+                                         , ("im_info", img_info)]
+                [rois, cls_prob, bbox_pred] <- forwardOnly binding
+                liftIO $ do
+                    ndshape rois >>= print
+                    ndshape cls_prob >>= print
+                    ndshape bbox_pred >>= print
+                    print $ "Done: " ++ img_ident
+
+mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym  <- symbolTrain rcnn_conf
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
@@ -170,9 +236,18 @@ main = do
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
+        _cfg_fixed_params = S.fromList [
+            "conv1_1_weight",
+            "conv1_1_bias",
+            "conv1_2_weight",
+            "conv1_2_bias",
+            "conv2_1_weight",
+            "conv2_1_bias",
+            "conv2_2_weight",
+            "conv2_2_bias"],
         _cfg_context = contextGPU0
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.0000001) (#momentum := 0.9
+    optimizer <- makeOptimizer SGD'Mom (Const 0.0001) (#momentum := 0.9
                                                    .& #wd := 0.0005
                                                    .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
                                                    .& #clip_gradient := 5
@@ -181,7 +256,6 @@ main = do
     runResourceT $ flip runReaderT coco_conf $ train sess $ do
         -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
         checkpoint <- lastSavedState "checkpoints"
-        liftIO $ print checkpoint
         start_epoch <- case checkpoint of
             Nothing -> do
                 liftIO $ print pretrained_weights
@@ -211,8 +285,5 @@ main = do
 
             saveState (ei == 1) (printf "checkpoints/faster_rcnn_epoch_%03d" ei)
             liftIO $ putStrLn ""
-
-    mxNotifyShutdown
-
 
 toTuple [a, b, c] = (a, b, c)
