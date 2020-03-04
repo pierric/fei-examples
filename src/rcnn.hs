@@ -56,6 +56,8 @@ data ProgConfig = ProgConfig {
     ds_img_size        :: Int,
     ds_img_pixel_means :: [Float],
     ds_img_pixel_stds  :: [Float],
+    pg_train_epochs    :: Int,
+    pg_train_iter_per_epoch :: Int,
     pg_infer           :: Bool,
     pg_infer_image_id  :: Int
 } deriving Show
@@ -89,6 +91,8 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "img-size"          <> metavar "SIZE" <> showDefault <> value 1024 <> help "long side of image")
                     <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN" <> showDefault <> value [0,0,0] <> help "RGB mean of images")
                     <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS" <> showDefault <> value [1,1,1] <> help "RGB std-dev of images")
+                    <*> option auto      (long "train-epochs"      <> metavar "EPOCHS" <> value 500 <> help "number of epochs to train")
+                    <*> option auto      (long "train-iter-per-epoch" <> metavar "ITER-PER-EPOCH" <> value 100 <> help "number of iter per epoch")
                     <*> switch           (long "inference" <> showDefault <> help "do inference")
                     <*> option auto      (long "inference-img-id" <> value 0 <> help "image id"))
   where
@@ -267,10 +271,10 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
         metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
 
-        forM_ [start_epoch..1000] $ \ ei -> do
+        forM_ [start_epoch..pg_train_epochs] $ \ ei -> do
             liftIO $ putStrLn $ "Epoch " ++ show ei
             liftIO $ hFlush stdout
-            void $ forEachD_i (liftD $ takeD 50 data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
+            void $ forEachD_i (liftD $ takeD pg_train_iter_per_epoch data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
                 let binding = M.fromList [ ("data",        x0)
                                          , ("im_info",     x1)
                                          , ("gt_boxes",    x2)
