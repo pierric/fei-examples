@@ -77,16 +77,7 @@ main = do
                                          .& #data_shape  := [3,32,32]
                                          .& #batch_size  := 32 .& Nil) ::DS
 
-        forM_ (enumFromTo 1 5) $ \ind -> do
-            void $ forEachD_ni trainingData $ \((t,i), (x, y)) -> do
-                -- eval <- format metric
-                liftIO $ printInLine $ show i ++ "/" ++ show t -- ++ " " ++ eval
-                fit (M.fromList [("x", x), ("y", y)])
-                update optimizer M.empty
-            liftIO $ putStrLn ""
-
-
-        -- fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 18
+        fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 18
 
   where
     bind ["x", "y"] (dat, lbl) = M.fromList [("x", dat), ("y", lbl)]

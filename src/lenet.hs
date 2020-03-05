@@ -61,19 +61,14 @@ main = do
         liftIO $ putStrLn $ "[Train] "
         forM_ (range 1) $ \ind -> do
             liftIO $ putStrLn $ "iteration " ++ show ind
-            -- metric <- newMetric "train" (CrossEntropy "y")
-            metric <- newMetric "train" MNil
+            metric <- newMetric "train" (CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
-                -- liftIO $ putStrLn "A"
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
-                -- liftIO $ putStrLn "B"
                 eval <- format metric
                 liftIO $ do
                     putStr $ "\r\ESC[K" ++ show i ++ "/" ++ show total1 ++ " " ++ eval
                     hFlush stdout
-                    -- putStrLn "C"
                     waitAll
-            liftIO $ putStrLn "D"
 
             metric <- newMetric "val" (Accuracy "y")
             result <- forEachD_i testingData $ \(i, (x, y)) -> do
