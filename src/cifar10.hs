@@ -5,6 +5,7 @@
 module Main where
 
 import qualified Data.HashMap.Strict as M
+import qualified Data.HashSet as S
 import Control.Monad (forM_, void)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
@@ -51,13 +52,14 @@ main = do
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
     net  <- case model of
-              Resnet  -> Resnet.symbol 10 34 [3,32,32]
+              Resnet  -> Resnet.symbol 10 34 32
               Resnext -> Resnext.symbol
     sess <- initialize @"cifar10" net $ Config {
                 _cfg_data = M.singleton "x" [3,32,32],
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = S.fromList [],
                 _cfg_context = contextGPU0
             }
 

@@ -6,6 +6,7 @@
 module Main where
 
 import qualified Data.HashMap.Strict as M
+import qualified Data.HashSet as S
 import Control.Monad (forM_, void)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
@@ -40,6 +41,7 @@ main = do
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = S.fromList [],
                 _cfg_context = contextGPU0
             }
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil

@@ -21,40 +21,80 @@ instance Exception NoKnownExperiment
 -------------------------------------------------------------------------------
 -- ResNet
 
-symbol :: DType a => Int -> Int -> [Int] -> IO (Symbol a)
-symbol num_classes num_layers image_shape@[_, height, _] =
-    if height <= 28 then do
-        handle <- if (num_layers - 2) `mod` 9 == 0 && num_layers >= 164 then
-                      resnet $ #image_shape := image_shape
-                            .& #num_classes := num_classes
-                            .& #num_stages := 3
-                            .& #filter_list := [64, 64, 128, 256]
-                            .& #units := replicate 3 ((num_layers - 2) `div` 9)
-                            .& #bottle_neck := True
-                            .& #workspace := 256 .& Nil
-                  else if (num_layers - 2) `mod` 6 == 0 && num_layers < 164 then
-                      resnet $ #image_shape := image_shape
-                            .& #num_classes := num_classes
-                            .& #num_stages := 3
-                            .& #filter_list := [64, 64, 32, 64]
-                            .& #units := replicate 3 ((num_layers - 2) `div` 6)
-                            .& #bottle_neck := False
-                            .& #workspace := 256
-                            .& Nil
-                  else
-                      throwIO $ NoKnownExperiment num_layers
-        return $ Symbol handle
-    else do
-        handle <- resnet $ #image_shape := image_shape .& #num_classes := num_classes .& #num_stages := 4 .& case num_layers of
-          18  -> #filter_list := [64, 64, 128, 256, 512] .& #units := [2,2,2,2] .& #bottle_neck := False .& #workspace := 256 .& Nil
-          34  -> #filter_list := [64, 64, 128, 256, 512] .& #units := [3,4,6,3] .& #bottle_neck := False .& #workspace := 256 .& Nil
-          50  -> #filter_list := [64, 256, 512, 1024, 2048] .& #units := [3,4,6,3]   .& #bottle_neck := True .& #workspace := 256 .& Nil
-          101 -> #filter_list := [64, 256, 512, 1024, 2048] .& #units := [3,4,23,3]  .& #bottle_neck := True .& #workspace := 256 .& Nil
-          152 -> #filter_list := [64, 256, 512, 1024, 2048] .& #units := [3,8,36,3]  .& #bottle_neck := True .& #workspace := 256 .& Nil
-          200 -> #filter_list := [64, 256, 512, 1024, 2048] .& #units := [3,24,36,3] .& #bottle_neck := True .& #workspace := 256 .& Nil
-          269 -> #filter_list := [64, 256, 512, 1024, 2048] .& #units := [3,30,48,8] .& #bottle_neck := True .& #workspace := 256 .& Nil
-          _   -> throw $ NoKnownExperiment num_layers
-        return $ Symbol handle
+symbol :: DType a => Int -> Int -> Int -> IO (Symbol a)
+symbol num_classes num_layers image_size = do
+    let args = if image_size <= 28 then args_small_image else args_large_image
+
+    x <- variable "x"
+    y <- variable "y"
+
+    u <- getFeature args x
+    u <- getTopFeature args u
+
+    flt <- flatten "flt-1" (#data := u .& Nil)
+    fc1 <- fullyConnected "fc-1" (#data := flt .& #num_hidden := num_classes .& Nil)
+
+    ret <- softmaxoutput "softmax" (#data := fc1 .& #label := y .& Nil)
+    return $ Symbol ret
+
+  where
+    args_common = #image_size := image_size
+               .& #num_classes := num_classes
+               .& #workspace := 256 .& Nil
+    args_small_image
+        | (num_layers - 2) `mod` 9 == 0 && num_layers >= 164 = #num_stages := 3
+                                                           .& #filter_list := [64, 64, 128, 256]
+                                                           .& #units := replicate 3 ((num_layers - 2) `div` 9)
+                                                           .& #bottle_neck := True
+                                                           .& args_common
+        | (num_layers - 2) `mod` 6 == 0 && num_layers < 164 = #num_stages := 3
+                                                          .& #filter_list := [64, 64, 32, 64]
+                                                          .& #units := replicate 3 ((num_layers - 2) `div` 6)
+                                                          .& #bottle_neck := False
+                                                          .& args_common
+
+    args_large_image
+        | num_layers == 18  = #num_stages := 4
+                          .& #filter_list := [64, 64, 128, 256, 512]
+                          .& #units := [2,2,2,2]
+                          .& #bottle_neck := False
+                          .& args_common
+        | num_layers == 34  = #num_stages := 4
+                          .& #filter_list := [64, 64, 128, 256, 512]
+                          .& #units := [3,4,6,3]
+                          .& #bottle_neck := False
+                          .& args_common
+        | num_layers == 50  = #num_stages := 4
+                          .& #filter_list := [64, 256, 512, 1024, 2048]
+                          .& #units := [3,4,6,3]
+                          .& #bottle_neck := True
+                          .& args_common
+        | num_layers == 101 = #num_stages := 4
+                          .& #filter_list := [64, 256, 512, 1024, 2048]
+                          .& #units := [3,4,23,3]
+                          .& #bottle_neck := True
+                          .& args_common
+        | num_layers == 152 = #num_stages := 4
+                          .& #filter_list := [64, 256, 512, 1024, 2048]
+                          .& #units := [3,8,36,3]
+                          .& #bottle_neck := True
+                          .& args_common
+        | num_layers == 200 = #num_stages := 4
+                          .& #filter_list := [64, 256, 512, 1024, 2048]
+                          .& #units := [3,24,36,3]
+                          .& #bottle_neck := True
+                          .& args_common
+        | num_layers == 269 = #num_stages := 4
+                          .& #filter_list := [64, 256, 512, 1024, 2048]
+                          .& #units := [3,30,48,8]
+                          .& #bottle_neck := True
+                          .& args_common
+
+eps :: Double
+eps = 2e-5
+
+bn_mom :: Float
+bn_mom = 0.9
 
 type instance ParameterList "resnet" =
   '[ '("num_classes", 'AttrReq Int)
@@ -63,22 +103,16 @@ type instance ParameterList "resnet" =
    , '("units"      , 'AttrReq [Int])
    , '("bottle_neck", 'AttrReq Bool)
    , '("workspace"  , 'AttrReq Int)
-   , '("image_shape", 'AttrReq [Int])]
-resnet :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> IO SymbolHandle
-resnet args = do
-    x  <- variable "x"
-    y  <- variable "y"
+   , '("image_size" , 'AttrReq Int)]
 
-    xcp <- identity "id" (#data := x .& Nil)
-
-    bnx <- batchnorm "bn-x" (#data := xcp
+getFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
+getFeature args inp = do
+    bnx <- batchnorm "bn-x" (#data := inp
                           .& #eps := eps
                           .& #momentum := bn_mom
                           .& #fix_gamma := True
                           .& Nil)
 
-    let [_, height, _] = args ! #image_shape
-        filter0 : filter_list = args ! #filter_list
     bdy <- if height <= 32
              then
                 convolution "conv-bn-x" (#data      := bnx
@@ -113,8 +147,18 @@ resnet args = do
                             .& #pool_type := #max
                             .& Nil)
 
-    bdy <- foldM build_layer bdy (zip3 [0::Int ..] filter_list (args ! #units))
+    foldM (buildLayer bottle_neck conv_workspace) bdy (zip3 [0::Int ..2] filter_list units)
 
+  where
+    height = args ! #image_size
+    filter0 : filter_list = args ! #filter_list
+    units = args ! #units
+    bottle_neck = args ! #bottle_neck 
+    conv_workspace = args ! #workspace
+
+getTopFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
+getTopFeature args inp = do
+    bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
     bn1 <- batchnorm "bn-1" (#data := bdy
                           .& #eps := eps
                           .& #momentum := bn_mom
@@ -129,23 +173,23 @@ resnet args = do
                           .& #global_pool := True
                           .& Nil)
 
-    flt <- flatten "flt-1" (#data := pl1 .& Nil)
-    fc1 <- fullyConnected "fc-1" (#data := flt .& #num_hidden := args ! #num_classes .& Nil)
-
-    softmaxoutput "softmax" (#data := fc1 .& #label := y .& Nil)
+    return pl1
   where
-    bn_mom = 0.9 :: Float
-    conv_workspace = 256 :: Int
-    eps = 2e-5 :: Double
+    filter = last $ args ! #filter_list
+    unit = last $ args ! #units
+    bottle_neck = args ! #bottle_neck 
+    conv_workspace = args ! #workspace
 
-    build_layer bdy (stage_id, filter_size, unit) = do
-        let stride0 = if stage_id == 0 then [1,1] else [2,2]
-            name unit_id = "stage" ++ show stage_id ++ "_unit" ++ show unit_id
-            resargs = #bottle_neck := False .& #workspace := conv_workspace .& #memonger := False .& Nil
-        bdy <- residual (name 0) (#data := bdy .& #num_filter := filter_size .& #stride := stride0 .& #dim_match := False .& resargs)
-        foldM (\bdy unit_id ->
-                residual (name unit_id) (#data := bdy .& #num_filter := filter_size .& #stride := [1,1] .& #dim_match := True .& resargs))
-              bdy [1..unit]
+buildLayer :: Bool -> Int -> SymbolHandle -> (Int, Int, Int) -> IO SymbolHandle
+buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) = do
+    bdy <- residual (name 0) (#data := bdy .& #num_filter := filter_size .& #stride := stride0 .& #dim_match := False .& resargs)
+    foldM (\bdy unit_id ->
+            residual (name unit_id) (#data := bdy .& #num_filter := filter_size .& #stride := [1,1] .& #dim_match := True .& resargs))
+          bdy [1..unit]
+  where
+    stride0 = if stage_id == 0 then [1,1] else [2,2]
+    name unit_id = "stage" ++ show stage_id ++ "_unit" ++ show unit_id
+    resargs = #bottle_neck := bottle_neck .& #workspace := workspace .& #memonger := False .& Nil
 
 type instance ParameterList "_residual_layer(resnet)" =
   '[ '("data"       , 'AttrReq SymbolHandle)
@@ -167,7 +211,6 @@ residual name args = do
         bn_mom     = fromMaybe 0.9  $ args !? #bn_mom
         workspace  = fromMaybe 256  $ args !? #workspace
         memonger   = fromMaybe False$ args !? #memonger
-        eps = 2e-5 :: Double
     if bottle_neck
       then do
         bn1 <- batchnorm (name ++ "-bn1") (#data := dat
