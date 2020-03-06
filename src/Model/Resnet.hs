@@ -10,6 +10,7 @@ import Control.Monad (foldM, when, void)
 import Control.Exception.Base (Exception, throw, throwIO)
 import Data.Maybe (fromMaybe)
 import Data.Typeable (Typeable)
+import Text.Printf
 
 import MXNet.Base
 import MXNet.NN.Layer
@@ -31,8 +32,8 @@ symbol num_classes num_layers image_size = do
     u <- getFeature args x
     u <- getTopFeature args u
 
-    flt <- flatten "flt-1" (#data := u .& Nil)
-    fc1 <- fullyConnected "fc-1" (#data := flt .& #num_hidden := num_classes .& Nil)
+    flt <- flatten "flt" (#data := u .& Nil)
+    fc1 <- fullyConnected "output" (#data := flt .& #num_hidden := num_classes .& Nil)
 
     ret <- softmaxoutput "softmax" (#data := fc1 .& #label := y .& Nil)
     return $ Symbol ret
@@ -107,7 +108,7 @@ type instance ParameterList "resnet" =
 
 getFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
 getFeature args inp = do
-    bnx <- batchnorm "bn-x" (#data := inp
+    bnx <- batchnorm "features.0" (#data := inp
                           .& #eps := eps
                           .& #momentum := bn_mom
                           .& #fix_gamma := True
@@ -115,7 +116,7 @@ getFeature args inp = do
 
     bdy <- if height <= 32
              then
-                convolution "conv-bn-x" (#data      := bnx
+                convolution "features.1" (#data      := bnx
                                       .& #kernel    := [3,3]
                                       .& #num_filter:= filter0
                                       .& #stride    := [1,1]
@@ -124,7 +125,7 @@ getFeature args inp = do
                                       .& #no_bias   := True
                                       .& Nil)
              else do
-                bdy <- convolution "conv-bn-x" (#data      := bnx
+                bdy <- convolution "features.1" (#data      := bnx
                                              .& #kernel    := [7,7]
                                              .& #num_filter:= filter0
                                              .& #stride    := [2,2]
@@ -132,15 +133,15 @@ getFeature args inp = do
                                              .& #workspace := conv_workspace
                                              .& #no_bias   := True
                                              .& Nil)
-                bdy <- batchnorm "bn-0" (#data      := bdy
+                bdy <- batchnorm "features.2" (#data      := bdy
                                       .& #fix_gamma := False
                                       .& #eps       := eps
                                       .& #momentum  := bn_mom
                                       .& Nil)
-                bdy <- activation "relu0" (#data      := bdy
+                bdy <- activation "features.3" (#data      := bdy
                                         .& #act_type  := #relu
                                         .& Nil)
-                pooling "max" (#data      := bdy
+                pooling "features.4" (#data      := bdy
                             .& #kernel    := [3,3]
                             .& #stride    := [2,2]
                             .& #pad       := [1,1]
@@ -153,21 +154,21 @@ getFeature args inp = do
     height = args ! #image_size
     filter0 : filter_list = args ! #filter_list
     units = args ! #units
-    bottle_neck = args ! #bottle_neck 
+    bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
 getTopFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
 getTopFeature args inp = do
     bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
-    bn1 <- batchnorm "bn-1" (#data := bdy
+    bn1 <- batchnorm "features.9" (#data := bdy
                           .& #eps := eps
                           .& #momentum := bn_mom
                           .& #fix_gamma := False
                           .& Nil)
-    ac1 <- activation "relu-1" (#data := bn1
+    ac1 <- activation "features.10" (#data := bn1
                              .& #act_type := #relu
                              .& Nil)
-    pl1 <- pooling "pool-1" (#data := ac1
+    pl1 <- pooling "features.11" (#data := ac1
                           .& #kernel := [7,7]
                           .& #pool_type := #avg
                           .& #global_pool := True
@@ -177,7 +178,7 @@ getTopFeature args inp = do
   where
     filter = last $ args ! #filter_list
     unit = last $ args ! #units
-    bottle_neck = args ! #bottle_neck 
+    bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
 buildLayer :: Bool -> Int -> SymbolHandle -> (Int, Int, Int) -> IO SymbolHandle
@@ -185,10 +186,10 @@ buildLayer bottle_neck workspace bdy (stage_id, filter_size, unit) = do
     bdy <- residual (name 0) (#data := bdy .& #num_filter := filter_size .& #stride := stride0 .& #dim_match := False .& resargs)
     foldM (\bdy unit_id ->
             residual (name unit_id) (#data := bdy .& #num_filter := filter_size .& #stride := [1,1] .& #dim_match := True .& resargs))
-          bdy [1..unit]
+          bdy [1..unit-1]
   where
     stride0 = if stage_id == 0 then [1,1] else [2,2]
-    name unit_id = "stage" ++ show stage_id ++ "_unit" ++ show unit_id
+    name unit_id = printf "features.%d.%d" (stage_id+5) unit_id
     resargs = #bottle_neck := bottle_neck .& #workspace := workspace .& #memonger := False .& Nil
 
 type instance ParameterList "_residual_layer(resnet)" =
@@ -213,12 +214,12 @@ residual name args = do
         memonger   = fromMaybe False$ args !? #memonger
     if bottle_neck
       then do
-        bn1 <- batchnorm (name ++ "-bn1") (#data := dat
+        bn1 <- batchnorm (name ++ ".bn1") (#data := dat
                                         .& #eps  := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False .& Nil)
-        act1 <- activation (name ++ "-relu1") (#data := bn1 .& #act_type := #relu .& Nil)
-        conv1 <- convolution (name ++ "-conv1") (#data := act1
+        act1 <- activation (name ++ ".relu1") (#data := bn1 .& #act_type := #relu .& Nil)
+        conv1 <- convolution (name ++ ".conv1") (#data := act1
                                               .& #kernel := [1,1]
                                               .& #num_filter := num_filter `div` 4
                                               .& #stride := [1,1]
@@ -226,15 +227,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn2 <- batchnorm (name ++ "-bn2") (#data := conv1
+        bn2 <- batchnorm (name ++ ".bn2") (#data := conv1
                                         .& #eps  := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act2 <- activation (name ++ "-relu2") (#data := bn2
+        act2 <- activation (name ++ ".relu2") (#data := bn2
                                             .& #act_type := #relu
                                             .& Nil)
-        conv2 <- convolution (name ++ "-conv2") (#data := act2
+        conv2 <- convolution (name ++ ".conv2") (#data := act2
                                               .& #kernel := [3,3]
                                               .& #num_filter := (num_filter `div` 4)
                                               .& #stride    := stride
@@ -242,15 +243,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn3 <- batchnorm (name ++ "-bn3") (#data      := conv2
+        bn3 <- batchnorm (name ++ ".bn3") (#data      := conv2
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act3 <- activation (name ++ "-relu3") (#data := bn3
+        act3 <- activation (name ++ ".relu3") (#data := bn3
                                             .& #act_type := #relu
                                             .& Nil)
-        conv3 <- convolution (name ++ "-conv3") (#data := act3
+        conv3 <- convolution (name ++ ".conv3") (#data := act3
                                               .& #kernel := [1,1]
                                               .& #num_filter := num_filter
                                               .& #stride    := [1,1]
@@ -260,7 +261,7 @@ residual name args = do
                                               .& Nil)
         shortcut <- if dim_match
                     then return dat
-                    else convolution (name ++ "-sc") (#data       := act1
+                    else convolution (name ++ ".downsample") (#data       := act1
                                                    .& #kernel     := [1,1]
                                                    .& #num_filter := num_filter
                                                    .& #stride     := stride
@@ -271,14 +272,14 @@ residual name args = do
           void $ mxSymbolSetAttr shortcut "mirror_stage" "true"
         plus name (#lhs := conv3 .& #rhs := shortcut .& Nil)
       else do
-        bn1 <- batchnorm (name ++ "-bn1") (#data      := dat
+        bn1 <- batchnorm (name ++ ".bn1") (#data      := dat
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act1 <- activation (name ++ "-relu1") (#data      := bn1
+        act1 <- activation (name ++ ".relu1") (#data      := bn1
                                             .& #act_type  := #relu .& Nil)
-        conv1 <- convolution (name ++ "-conv1") (#data      := act1
+        conv1 <- convolution (name ++ ".conv1") (#data      := act1
                                               .& #kernel    := [3,3]
                                               .& #num_filter:= num_filter
                                               .& #stride    := stride
@@ -286,15 +287,15 @@ residual name args = do
                                               .& #workspace := workspace
                                               .& #no_bias   := True
                                               .& Nil)
-        bn2 <- batchnorm (name ++ "-bn2") (#data      := conv1
+        bn2 <- batchnorm (name ++ ".bn2") (#data      := conv1
                                         .& #eps       := eps
                                         .& #momentum  := bn_mom
                                         .& #fix_gamma := False
                                         .& Nil)
-        act2 <- activation (name ++ "-relu2") (#data      := bn2
+        act2 <- activation (name ++ ".relu2") (#data      := bn2
                                             .& #act_type  := #relu
                                             .& Nil)
-        conv2 <- convolution (name ++ "-conv2") (#data      := act2
+        conv2 <- convolution (name ++ ".conv2") (#data      := act2
                                               .& #kernel    := [3,3]
                                               .& #num_filter:= num_filter
                                               .& #stride    := [1,1]
@@ -304,7 +305,7 @@ residual name args = do
                                               .& Nil)
         shortcut <- if dim_match
                     then return dat
-                    else convolution (name ++ "-sc") (#data      := act1
+                    else convolution (name ++ ".downsample") (#data      := act1
                                                    .& #kernel    := [1,1]
                                                    .& #num_filter:= num_filter
                                                    .& #stride    := stride
