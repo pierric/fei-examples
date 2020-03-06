@@ -25,6 +25,7 @@ import Data.Conduit
 import qualified Data.Conduit.List as C
 import System.Directory (doesFileExist, canonicalizePath)
 import Text.Printf (printf)
+import qualified Data.Vector as V
 
 import MXNet.Base (
     NDArray(..), toVector, execForward,
@@ -35,20 +36,15 @@ import MXNet.Base (
     listOutputs, internals, inferShape, at', at,
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
-import MXNet.NN hiding (reshape) 
+import MXNet.NN hiding (reshape)
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.Utils (loadState, saveState)
 import MXNet.NN.NDArray (reshape)
 import Model.FasterRCNN
+import Model.ProposalTarget
 import qualified DataIter.Coco as Coco
 import qualified MXNet.NN.DataIter.Coco as Coco
-
-import qualified Data.Array.Repa as Repa
-import qualified Data.Vector as V
-import MXNet.Base (execGetOutputs)
-import Control.Lens ((%=))
-import Debug.Trace
 
 
 data ProgConfig = ProgConfig {
@@ -165,6 +161,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_label = [],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
+        -- TODO: fix all params
         _cfg_fixed_params = S.fromList [
             "conv1_1_weight",
             "conv1_1_bias",
