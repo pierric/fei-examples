@@ -110,44 +110,32 @@ getFeature inp args = do
                           .& #fix_gamma := True
                           .& Nil)
 
-    bdy <- if height <= 32
-             then
-                convolution "features.1" (#data      := bnx
-                                      .& #kernel    := [3,3]
-                                      .& #num_filter:= filter0
-                                      .& #stride    := [1,1]
-                                      .& #pad       := [1,1]
-                                      .& #workspace := conv_workspace
-                                      .& #no_bias   := True
-                                      .& Nil)
-             else do
-                bdy <- convolution "features.1" (#data      := bnx
-                                             .& #kernel    := [7,7]
-                                             .& #num_filter:= filter0
-                                             .& #stride    := [2,2]
-                                             .& #pad       := [3,3]
-                                             .& #workspace := conv_workspace
-                                             .& #no_bias   := True
-                                             .& Nil)
-                bdy <- batchnorm "features.2" (#data      := bdy
-                                      .& #fix_gamma := False
-                                      .& #eps       := eps
-                                      .& #momentum  := bn_mom
-                                      .& Nil)
-                bdy <- activation "features.3" (#data      := bdy
-                                        .& #act_type  := #relu
-                                        .& Nil)
-                pooling "features.4" (#data      := bdy
-                            .& #kernel    := [3,3]
-                            .& #stride    := [2,2]
-                            .& #pad       := [1,1]
-                            .& #pool_type := #max
-                            .& Nil)
+    bdy <- convolution "features.1" (#data      := bnx
+                                 .& #kernel    := [7,7]
+                                 .& #num_filter:= filter0
+                                 .& #stride    := [2,2]
+                                 .& #pad       := [3,3]
+                                 .& #workspace := conv_workspace
+                                 .& #no_bias   := True
+                                 .& Nil)
+    bdy <- batchnorm "features.2" (#data      := bdy
+                                .& #fix_gamma := False
+                                .& #eps       := eps
+                                .& #momentum  := bn_mom
+                                .& Nil)
+    bdy <- activation "features.3" (#data      := bdy
+                                 .& #act_type  := #relu
+                                 .& Nil)
+    bdy <- pooling "features.4" (#data      := bdy
+                              .& #kernel    := [3,3]
+                              .& #stride    := [2,2]
+                              .& #pad       := [1,1]
+                              .& #pool_type := #max
+                              .& Nil)
 
     foldM (buildLayer bottle_neck conv_workspace) bdy (zip3 [0::Int ..2] filter_list units)
 
   where
-    height = args ! #image_size
     filter0 : filter_list = args ! #filter_list
     units = args ! #units
     bottle_neck = args ! #bottle_neck
