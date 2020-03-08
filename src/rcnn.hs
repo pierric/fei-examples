@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import qualified Data.HashMap.Strict as M
@@ -28,12 +29,12 @@ import Text.Printf (printf)
 import qualified Data.Vector as V
 
 import MXNet.Base (
-    NDArray(..), toVector, execForward,
+    NDArray(..), Symbol, toVector, execForward,
     contextCPU, contextGPU0,
     mxListAllOpNames, mxNotifyShutdown, mxNDArraySave,
     registerCustomOperator,
     ndshape,
-    listOutputs, internals, inferShape, at', at,
+    listArguments, listOutputs, internals, inferShape, at', at,
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN hiding (reshape)
@@ -141,6 +142,26 @@ loadWeights weights_path = do
                                        "bbox_pred_weight",
                                        "bbox_pred_bias"]
 
+data Stage = TRAIN | INFERENCE
+
+fixedParams :: Backbone -> Stage -> Symbol Float -> IO (S.HashSet String)
+fixedParams model stage symbol = do
+    argnames <- listArguments symbol
+    return $ case (stage, model) of
+        (INFERENCE, _)    -> S.fromList argnames
+        (TRAIN, VGG16)    -> S.fromList [n | n <- argnames
+                                        -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
+                                        , layer n `elem` ["0", "2", "5", "7"]]
+        (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
+                                        -- fix conv_0, stage_1_*, *_gamma, *_beta
+                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+
+  where
+    layer param = case T.splitOn "." $ T.pack param of
+                    "features":n:_ -> n
+                    _ -> "<na>"
+    name  param = last $ T.splitOn "." $ T.pack param
+
 main :: IO ()
 main = do
     _    <- mxListAllOpNames
@@ -154,6 +175,8 @@ main = do
 
 mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym <- symbolInfer rcnn_conf
+    fixed_params <- fixedParams VGG16 INFERENCE sym
+
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
     sess <- initialize @"fastrcnn" sym $ Config {
         _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
@@ -161,16 +184,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_label = [],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
-        -- TODO: fix all params
-        _cfg_fixed_params = S.fromList [
-            "conv1_1_weight",
-            "conv1_1_bias",
-            "conv1_2_weight",
-            "conv1_2_bias",
-            "conv2_1_weight",
-            "conv2_1_bias",
-            "conv2_2_weight",
-            "conv2_2_bias"],
+        _cfg_fixed_params = fixed_params,
         _cfg_context = contextGPU0
     }
     let vimg = V.filter (\img -> img ^. img_id == pg_infer_image_id) $ coco_inst_ ^. images
@@ -204,6 +218,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
 mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym  <- symbolTrain rcnn_conf
+    fixed_params <- fixedParams VGG16 TRAIN sym
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     -- get the feature (width, height) at the top of feature extraction.
@@ -237,15 +252,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
-        _cfg_fixed_params = S.fromList [
-            "conv1_1_weight",
-            "conv1_1_bias",
-            "conv1_2_weight",
-            "conv1_2_bias",
-            "conv2_1_weight",
-            "conv2_1_bias",
-            "conv2_2_weight",
-            "conv2_2_bias"],
+        _cfg_fixed_params = fixed_params,
         _cfg_context = contextGPU0
     }
     optimizer <- makeOptimizer SGD'Mom (Const 0.0001) (#momentum := 0.9
