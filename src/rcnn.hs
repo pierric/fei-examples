@@ -82,7 +82,8 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"    <> showDefault <> value 0.25      <> help "rcnn foreground fraction")
                     <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"     <> showDefault <> value 0.5       <> help "rcnn foreground iou threshold")
                     <*> option floatList (long "rcnn-bbox-stds"    <> metavar "BBOX-STDDEV"    <> showDefault <> value [0.1, 0.1, 0.2, 0.2] <> help "standard deviation of bbox")
-                    <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model"))
+                    <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model")
+                    <*> option auto      (long "backbone"          <> metavar "BACKBONE"       <> value VGG16 <> help "vgg-16 or resnet-50"))
                 (ProgConfig
                     <$> strOption        (long "base" <> metavar "PATH" <> help "path to the dataset")
                     <*> option auto      (long "img-size"          <> metavar "SIZE" <> showDefault <> value 1024 <> help "long side of image")
@@ -145,9 +146,9 @@ loadWeights weights_path = do
 data Stage = TRAIN | INFERENCE
 
 fixedParams :: Backbone -> Stage -> Symbol Float -> IO (S.HashSet String)
-fixedParams model stage symbol = do
+fixedParams backbone stage symbol = do
     argnames <- listArguments symbol
-    return $ case (stage, model) of
+    return $ case (stage, backbone) of
         (INFERENCE, _)    -> S.fromList argnames
         (TRAIN, VGG16)    -> S.fromList [n | n <- argnames
                                         -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
@@ -175,7 +176,7 @@ main = do
 
 mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym <- symbolInfer rcnn_conf
-    fixed_params <- fixedParams VGG16 INFERENCE sym
+    fixed_params <- fixedParams backbone INFERENCE sym
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
     sess <- initialize @"fastrcnn" sym $ Config {
@@ -218,7 +219,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
 mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym  <- symbolTrain rcnn_conf
-    fixed_params <- fixedParams VGG16 TRAIN sym
+    fixed_params <- fixedParams backbone TRAIN sym
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     -- get the feature (width, height) at the top of feature extraction.

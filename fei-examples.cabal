@@ -67,6 +67,7 @@ Executable custom-op
 Executable rcnn
   main-is:             rcnn.hs
   other-modules:       Model.VGG,
+                       Model.Resnet,
                        Model.FasterRCNN,
                        Model.ProposalTarget ,
                        DataIter.Coco

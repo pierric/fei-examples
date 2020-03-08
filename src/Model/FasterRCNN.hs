@@ -25,8 +25,11 @@ import qualified MXNet.NN.NDArray as A
 import MXNet.NN.Layer
 import MXNet.NN.EvalMetric
 import qualified Model.VGG as VGG
-import Model.ProposalTarget 
+import qualified Model.Resnet as Resnet
+import Model.ProposalTarget
 
+data Backbone = VGG16 | RESNET50
+  deriving (Show, Read, Eq)
 
 data RcnnConfiguration = RcnnConfiguration {
     rpn_anchor_scales :: [Int],
@@ -49,8 +52,16 @@ data RcnnConfiguration = RcnnConfiguration {
     rcnn_fg_fraction :: Float,
     rcnn_fg_overlap  :: Float,
     rcnn_bbox_stds   :: [Float],
-    pretrained_weights :: String
+    pretrained_weights :: String,
+    backbone :: Backbone
 } deriving Show
+
+resnet50Args = (#num_stages := 4
+             .& #filter_list := [64, 256, 512, 1024, 2048]
+             .& #units := [3,4,6,3]
+             .& #bottle_neck := True
+             .& #workspace := 256
+             .& Nil)
 
 symbolTrain :: RcnnConfiguration -> IO (Symbol Float)
 symbolTrain RcnnConfiguration{..} =  do
@@ -69,7 +80,9 @@ symbolTrain RcnnConfiguration{..} =  do
     rpnBoxWeight <- variable "bbox_weight"
 
     -- VGG-15 without the last pooling layer
-    convFeat <- VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
+    convFeat <- case backbone of
+                  VGG16 -> VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
+                  RESNET50 -> Resnet.getFeature dat resnet50Args
 
     rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
     rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
@@ -117,7 +130,11 @@ symbolTrain RcnnConfiguration{..} =  do
     roiPool <- _ROIPooling "roi_pool" (#data := convFeat .& #rois := rois
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
-    topFeat <- VGG.getTopFeature Nothing roiPool
+
+    topFeat <- case backbone of
+                 VGG16    -> VGG.getTopFeature roiPool
+                 RESNET50 -> Resnet.getTopFeature roiPool resnet50Args
+
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
 
@@ -154,7 +171,9 @@ symbolInfer RcnnConfiguration{..} = do
     imInfo <- variable "im_info"
 
     -- VGG-15 without the last pooling layer
-    convFeat <- VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
+    convFeat <- case backbone of
+                  VGG16 -> VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
+                  RESNET50 -> Resnet.getFeature dat resnet50Args
 
     rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
     rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
@@ -184,7 +203,11 @@ symbolInfer RcnnConfiguration{..} = do
     roiPool <- _ROIPooling "roi_pool" (#data := convFeat .& #rois := rois
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
-    topFeat <- VGG.getTopFeature Nothing roiPool
+
+    topFeat <- case backbone of
+                 VGG16 -> VGG.getTopFeature roiPool
+                 RESNET50 -> Resnet.getTopFeature roiPool resnet50Args
+
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- softmax "cls_prob" (#data := clsScore .& Nil)
 

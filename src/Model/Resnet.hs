@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-module Model.Resnet (symbol) where
+module Model.Resnet (symbol, getFeature, getTopFeature) where
 
 import Control.Monad (foldM, when, void)
 import Control.Exception.Base (Exception, throw, throwIO)
