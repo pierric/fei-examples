@@ -29,8 +29,8 @@ symbol num_classes num_layers image_size = do
     x <- variable "x"
     y <- variable "y"
 
-    u <- getFeature args x
-    u <- getTopFeature args u
+    u <- getFeature x args
+    u <- getTopFeature u args
 
     flt <- flatten "flt" (#data := u .& Nil)
     fc1 <- fullyConnected "output" (#data := flt .& #num_hidden := num_classes .& Nil)
@@ -39,9 +39,7 @@ symbol num_classes num_layers image_size = do
     return $ Symbol ret
 
   where
-    args_common = #image_size := image_size
-               .& #num_classes := num_classes
-               .& #workspace := 256 .& Nil
+    args_common = #workspace := 256 .& Nil
     args_small_image
         | (num_layers - 2) `mod` 9 == 0 && num_layers >= 164 = #num_stages := 3
                                                            .& #filter_list := [64, 64, 128, 256]
@@ -98,16 +96,14 @@ bn_mom :: Float
 bn_mom = 0.9
 
 type instance ParameterList "resnet" =
-  '[ '("num_classes", 'AttrReq Int)
-   , '("num_stages" , 'AttrReq Int)
+  '[ '("num_stages" , 'AttrReq Int)
    , '("filter_list", 'AttrReq [Int])
    , '("units"      , 'AttrReq [Int])
    , '("bottle_neck", 'AttrReq Bool)
-   , '("workspace"  , 'AttrReq Int)
-   , '("image_size" , 'AttrReq Int)]
+   , '("workspace"  , 'AttrReq Int)]
 
-getFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
-getFeature args inp = do
+getFeature :: (Fullfilled "resnet" args) => SymbolHandle -> ArgsHMap "resnet" args -> IO SymbolHandle
+getFeature inp args = do
     bnx <- batchnorm "features.0" (#data := inp
                           .& #eps := eps
                           .& #momentum := bn_mom
@@ -157,8 +153,8 @@ getFeature args inp = do
     bottle_neck = args ! #bottle_neck
     conv_workspace = args ! #workspace
 
-getTopFeature :: (Fullfilled "resnet" args) => ArgsHMap "resnet" args -> SymbolHandle -> IO SymbolHandle
-getTopFeature args inp = do
+getTopFeature :: (Fullfilled "resnet" args) => SymbolHandle -> ArgsHMap "resnet" args -> IO SymbolHandle
+getTopFeature inp args = do
     bdy <- buildLayer bottle_neck conv_workspace inp (3, filter, unit)
     bn1 <- batchnorm "features.9" (#data := bdy
                           .& #eps := eps
