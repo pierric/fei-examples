@@ -29,8 +29,8 @@ symbol num_classes num_layers image_size = do
     x <- variable "x"
     y <- variable "y"
 
-    u <- getFeature x args
-    u <- getTopFeature u args
+    (u, makeTop) <- getFeature x args
+    u <- makeTop u
 
     flt <- flatten "flt" (#data := u .& Nil)
     fc1 <- fullyConnected "output" (#data := flt .& #num_hidden := num_classes .& Nil)
@@ -102,7 +102,7 @@ type instance ParameterList "resnet" =
    , '("bottle_neck", 'AttrReq Bool)
    , '("workspace"  , 'AttrReq Int)]
 
-getFeature :: (Fullfilled "resnet" args) => SymbolHandle -> ArgsHMap "resnet" args -> IO SymbolHandle
+getFeature :: (Fullfilled "resnet" args) => SymbolHandle -> ArgsHMap "resnet" args -> IO (SymbolHandle, SymbolHandle -> IO SymbolHandle)
 getFeature inp args = do
     bnx <- batchnorm "features.0" (#data := inp
                           .& #eps := eps
@@ -133,7 +133,9 @@ getFeature inp args = do
                               .& #pool_type := #max
                               .& Nil)
 
-    foldM (buildLayer bottle_neck conv_workspace) bdy (zip3 [0::Int ..2] filter_list units)
+    bdy <- foldM (buildLayer bottle_neck conv_workspace) bdy (zip3 [0::Int ..2] filter_list units)
+
+    return (bdy, flip getTopFeature args)
 
   where
     filter0 : filter_list = args ! #filter_list
