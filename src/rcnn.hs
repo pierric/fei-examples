@@ -285,6 +285,10 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
         metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
 
+        -- update the internal counting of the iterations
+        -- the lr is updated as per to it
+        untag . mod_statistics . stat_num_upd .= (start_epoch - 1) * pg_train_iter_per_epoch
+
         forM_ [start_epoch..pg_train_epochs] $ \ ei -> do
             liftIO $ putStrLn $ "Epoch " ++ show ei
             liftIO $ hFlush stdout
@@ -297,8 +301,9 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                          , ("bbox_weight", y2) ]
                 fitAndEval optimizer binding metric
                 eval <- format metric
+                lr <- use (untag . mod_statistics . stat_last_lr)
                 liftIO $ do
-                    putStrLn $ show i ++ " " ++ eval
+                    putStrLn $ show i ++ " " ++ eval ++ " LR: " ++ show lr
                     hFlush stdout
 
             saveState (ei == 1) (printf "checkpoints/faster_rcnn_epoch_%03d" ei)
