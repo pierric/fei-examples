@@ -27,6 +27,7 @@ import qualified Data.Conduit.List as C
 import System.Directory (doesFileExist, canonicalizePath)
 import Text.Printf (printf)
 import qualified Data.Vector as V
+import Data.List (sort)
 
 import MXNet.Base (
     NDArray(..), Symbol, toVector, execForward,
@@ -115,16 +116,16 @@ toTriple x = error (show x)
 
 default_initializer :: Initializer Float
 default_initializer name = case name of
-    "rpn_conv_3x3_weight"  -> normal 0.01 name
-    "rpn_conv_3x3_bias"    -> zeros name
-    "rpn_cls_score_weight" -> normal 0.01 name
-    "rpn_cls_score_bias"   -> zeros name
-    "rpn_bbox_pred_weight" -> normal 0.01 name
-    "rpn_bbox_pred_bias"   -> zeros name
-    "cls_score_weight"     -> normal 0.01 name
-    "cls_score_bias"       -> zeros name
-    "bbox_pred_weight"     -> normal 0.001 name
-    "bbox_pred_bias"       -> zeros name
+    "rpn_conv_3x3.weight"  -> normal 0.01 name
+    "rpn_conv_3x3.bias"    -> zeros name
+    "rpn_cls_score.weight" -> normal 0.01 name
+    "rpn_cls_score.bias"   -> zeros name
+    "rpn_bbox_pred.weight" -> normal 0.01 name
+    "rpn_bbox_pred.bias"   -> zeros name
+    "cls_score.weight"     -> normal 0.01 name
+    "cls_score.bias"       -> zeros name
+    "bbox_pred.weight"     -> normal 0.001 name
+    "bbox_pred.bias"       -> zeros name
     _ -> empty name
 
 loadWeights weights_path = do
@@ -132,16 +133,16 @@ loadWeights weights_path = do
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
     if not e
         then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist."
-        else loadState weights_path ["rpn_conv_3x3_weight",
-                                       "rpn_conv_3x3_bias",
-                                       "rpn_cls_score_weight",
-                                       "rpn_cls_score_bias",
-                                       "rpn_bbox_pred_weight",
-                                       "rpn_bbox_pred_bias",
-                                       "cls_score_weight",
-                                       "cls_score_bias",
-                                       "bbox_pred_weight",
-                                       "bbox_pred_bias"]
+        else loadState weights_path ["rpn_conv_3x3.weight",
+                                     "rpn_conv_3x3.bias",
+                                     "rpn_cls_score.weight",
+                                     "rpn_cls_score.bias",
+                                     "rpn_bbox_pred.weight",
+                                     "rpn_bbox_pred.bias",
+                                     "cls_score.weight",
+                                     "cls_score.bias",
+                                     "bbox_pred.weight",
+                                     "bbox_pred.bias"]
 
 data Stage = TRAIN | INFERENCE
 
@@ -154,6 +155,9 @@ fixedParams backbone stage symbol = do
                                         -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
                                         , layer n `elem` ["0", "2", "5", "7"]]
         (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
+                                        -- fix conv_0, stage_1_*, *_gamma, *_beta
+                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+        (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
 
@@ -256,11 +260,15 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_fixed_params = fixed_params,
         _cfg_context = contextGPU0
     }
-    optimizer <- makeOptimizer SGD'Mom (Const 0.0001) (#momentum := 0.9
-                                                   .& #wd := 0.0005
-                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
-                                                   .& #clip_gradient := 5
-                                                   .& Nil)
+
+    -- optimizer <- makeOptimizer SGD'Mom (Const 0.0001) (#momentum := 0.9
+    --                                                .& #wd := 0.0005
+    --                                                .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+    --                                                .& #clip_gradient := 5
+    --                                                .& Nil)
+    optimizer <- makeOptimizer ADAM (Factor 0.001 0.5 500 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+                                                                   .& #clip_gradient := 5
+                                                                   .& Nil)
 
     runResourceT $ flip runReaderT coco_conf $ train sess $ do
         -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
@@ -273,6 +281,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
             Just filename -> do
                 loadState filename []
                 return $ read (take 3 $ drop 30 filename) + 1
+        liftIO $ putStrLn ("fixed parameters: " ++ show (sort $ S.toList fixed_params))
 
         metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
 

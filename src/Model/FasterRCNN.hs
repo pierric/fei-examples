@@ -28,7 +28,7 @@ import qualified Model.VGG as VGG
 import qualified Model.Resnet as Resnet
 import Model.ProposalTarget
 
-data Backbone = VGG16 | RESNET50
+data Backbone = VGG16 | RESNET50 | RESNET101
   deriving (Show, Read, Eq)
 
 data RcnnConfiguration = RcnnConfiguration {
@@ -63,6 +63,13 @@ resnet50Args = (#num_stages := 4
              .& #workspace := 256
              .& Nil)
 
+resnet101Args = (#num_stages := 4
+             .& #filter_list := [64, 256, 512, 1024, 2048]
+             .& #units := [3,4,23,3]
+             .& #bottle_neck := True
+             .& #workspace := 256
+             .& Nil)
+
 symbolTrain :: RcnnConfiguration -> IO (Symbol Float)
 symbolTrain RcnnConfiguration{..} =  do
     let numAnchors = length rpn_anchor_scales * length rpn_anchor_ratios
@@ -80,9 +87,10 @@ symbolTrain RcnnConfiguration{..} =  do
     rpnBoxWeight <- variable "bbox_weight"
 
     -- VGG-15 without the last pooling layer
-    convFeat <- case backbone of
+    (convFeat, makeTopFeature) <- case backbone of
                   VGG16 -> VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
                   RESNET50 -> Resnet.getFeature dat resnet50Args
+                  RESNET101 -> Resnet.getFeature dat resnet101Args
 
     rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
     rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
@@ -131,9 +139,7 @@ symbolTrain RcnnConfiguration{..} =  do
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
 
-    topFeat <- case backbone of
-                 VGG16    -> VGG.getTopFeature roiPool
-                 RESNET50 -> Resnet.getTopFeature roiPool resnet50Args
+    topFeat <- makeTopFeature roiPool
 
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- _SoftmaxOutput "cls_prob" (#data := clsScore .& #label := label .& #normalization := #batch .& Nil)
@@ -171,9 +177,10 @@ symbolInfer RcnnConfiguration{..} = do
     imInfo <- variable "im_info"
 
     -- VGG-15 without the last pooling layer
-    convFeat <- case backbone of
+    (convFeat, makeTopFeature) <- case backbone of
                   VGG16 -> VGG.getFeature dat [2, 2, 3, 3, 3] [64, 128, 256, 512, 512] False False
                   RESNET50 -> Resnet.getFeature dat resnet50Args
+                  RESNET101 -> Resnet.getFeature dat resnet101Args
 
     rpnConv <- convolution "rpn_conv_3x3" (#data := convFeat .& #kernel := [3,3] .& #pad := [1,1] .& #num_filter := 512 .& Nil)
     rpnRelu <- activation "rpn_relu" (#data := rpnConv .& #act_type := #relu .& Nil)
@@ -204,9 +211,7 @@ symbolInfer RcnnConfiguration{..} = do
                                     .& #pooled_size := rcnn_pooled_size
                                     .& #spatial_scale := 1.0 / fromIntegral rcnn_feature_stride .& Nil)
 
-    topFeat <- case backbone of
-                 VGG16 -> VGG.getTopFeature roiPool
-                 RESNET50 -> Resnet.getTopFeature roiPool resnet50Args
+    topFeat <- makeTopFeature roiPool
 
     clsScore <- fullyConnected "cls_score" (#data := topFeat .& #num_hidden := rcnn_num_classes .& Nil)
     clsProb <- softmax "cls_prob" (#data := clsScore .& Nil)
@@ -277,14 +282,14 @@ instance EvalMetricMethod RCNNAccMetric where
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
 
-        -- debug only
-        s1 <- ndshape (NDArray pred_class :: NDArray Float)
-        v1 <- toVector (NDArray pred_class :: NDArray Float)
-        print (s1, SV.map floor v1 :: SV.Vector Int)
+        -- -- debug only
+        -- s1 <- ndshape (NDArray pred_class :: NDArray Float)
+        -- v1 <- toVector (NDArray pred_class :: NDArray Float)
+        -- print (s1, SV.map floor v1 :: SV.Vector Int)
 
-        s1 <- ndshape label
-        v1 <- toVector label
-        print (s1, SV.map floor v1 :: SV.Vector Int)
+        -- s1 <- ndshape label
+        -- v1 <- toVector label
+        -- print (s1, SV.map floor v1 :: SV.Vector Int)
 
         pred_class <- toRepa @DIM2 (NDArray pred_class)
         label <- toRepa @DIM2 label
