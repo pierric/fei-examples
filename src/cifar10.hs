@@ -6,13 +6,15 @@ module Main where
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, void, when)
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Lens ((%~))
 import System.IO (hFlush, stdout)
 import Options.Applicative (Parser, execParser, header, info, fullDesc, helper, value, option, auto, metavar, short, showDefault, (<**>))
 import Data.Semigroup ((<>))
+import Control.Lens ((.=), (^.), use)
+import Text.Printf
 
 import MXNet.Base (NDArray(..), contextCPU, contextGPU0, mxListAllOpNames, toVector, (.&), HMap(..), ArgOf(..))
 import qualified MXNet.Base.Operators.NDArray as A
@@ -36,11 +38,11 @@ range = enumFromTo 1
 
 default_initializer :: Initializer Float
 default_initializer name shp
-    | endsWith "-bias"  name = zeros name shp
-    | endsWith "-beta"  name = zeros name shp
-    | endsWith "-gamma" name = ones  name shp
-    | endsWith "-moving-mean" name = zeros name shp
-    | endsWith "-moving-var"  name = ones  name shp
+    | endsWith ".bias"  name = zeros name shp
+    | endsWith ".beta"  name = zeros name shp
+    | endsWith ".gamma" name = ones  name shp
+    | endsWith ".running_mean" name = zeros name shp
+    | endsWith ".running_var"  name = ones  name shp
     | otherwise = case shp of
                     [_,_] -> xavier 2.0 XavierGaussian XavierIn name shp
                     _ -> normal 0.1 name shp
@@ -52,7 +54,7 @@ main = do
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
     net  <- case model of
-              Resnet  -> Resnet.symbol 10 34 32
+              Resnet  -> Resnet.symbol 10 50 32
               Resnext -> Resnext.symbol
     sess <- initialize @"cifar10" net $ Config {
                 _cfg_data = M.singleton "x" [3,32,32],
@@ -64,20 +66,28 @@ main = do
             }
 
     -- cbTP <- dumpThroughputEpoch
-    -- sess <- return $ (sess_callbacks %~ ([Callback DumpLearningRate, cbTP, Callback (Checkpoint "tmp")] ++)) sess
+    -- sess <- return $ (sess_callbacks %~ ([cbTP, Callback (Checkpoint "tmp")] ++)) sess
 
-    optimizer <- makeOptimizer ADAM (lrOfPoly $ #maxnup := 10000 .& #base := 0.05 .& #power := 1 .& Nil) Nil
+    optimizer <- makeOptimizer ADAM (lrOfPoly $ #maxnup := 10000 .& #base := 0.03 .& #power := 1 .& Nil) Nil
+    metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
 
     train sess $ do
 
         let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
                                          .& #data_shape  := [3,32,32]
                                          .& #batch_size  := 128 .& Nil) :: DS
-        let testingData  = imageRecordIter (#path_imgrec := "data/cifar10_val.rec"
-                                         .& #data_shape  := [3,32,32]
-                                         .& #batch_size  := 32 .& Nil) ::DS
 
-        fitDataset trainingData testingData bind optimizer (CrossEntropy "y" :* Accuracy "y" :* MNil) 18
+        forM_ [1..100::Int] $ \ ei -> do
+            liftIO $ putStrLn $ "Epoch " ++ show ei
+            void $ forEachD_i trainingData $ \(i, (x, y)) -> do
+                let binding = M.fromList [("x", x), ("y", y)]
+                fitAndEval optimizer binding metric
+                eval <- format metric
+                lr <- use (untag . mod_statistics . stat_last_lr)
+                liftIO $ do
+                    when (i `mod` 20 == 0) $ do
+                        putStrLn $ show i ++ " " ++ eval ++ " LR: " ++ show lr
+                    hFlush stdout
 
-  where
-    bind ["x", "y"] (dat, lbl) = M.fromList [("x", dat), ("y", lbl)]
+            saveState (ei == 1) (printf "checkpoints/cifar10_resnet50_epoch_%03d" ei)
+            liftIO $ putStrLn ""
