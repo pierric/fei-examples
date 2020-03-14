@@ -47,6 +47,7 @@ Executable cifar10
                       , vector >= 0.12
                       , optparse-applicative
                       , lens >= 4.12
+                      , text
                       , fei-base
                       , fei-nn
   default-extensions:   OverloadedLabels

@@ -2,22 +2,27 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import Control.Monad (forM_, void, when)
-import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Lens ((%~))
 import System.IO (hFlush, stdout)
-import Options.Applicative (Parser, execParser, header, info, fullDesc, helper, value, option, auto, metavar, short, showDefault, (<**>))
+import Options.Applicative
 import Data.Semigroup ((<>))
 import Control.Lens ((.=), (^.), use)
 import Text.Printf
+import qualified Data.Text as T
 
-import MXNet.Base (NDArray(..), contextCPU, contextGPU0, mxListAllOpNames, toVector, (.&), HMap(..), ArgOf(..))
-import qualified MXNet.Base.Operators.NDArray as A
+import MXNet.Base (
+    NDArray(..),
+    contextCPU, contextGPU0,
+    mxListAllOpNames,
+    (.&), HMap(..), ArgOf(..),
+    listArguments)
 import MXNet.NN
 import MXNet.NN.Utils
 import MXNet.NN.DataIter.Class
@@ -29,12 +34,13 @@ type ArrayF = NDArray Float
 type DS = StreamData (Module "cifar10" Float IO) (ArrayF, ArrayF)
 
 data Model   = Resnet | Resnext deriving (Show, Read)
-data ProgArg = ProgArg Model
+data ProgArg = ProgArg Model (Maybe String)
 cmdArgParser :: Parser ProgArg
-cmdArgParser = ProgArg <$> (option auto $ short 'm' <> metavar "MODEL" <> showDefault <> value Resnet)
-
-range :: Int -> [Int]
-range = enumFromTo 1
+cmdArgParser = ProgArg
+                <$> (option auto  $ short 'm' <> metavar "MODEL" <> showDefault <> value Resnet)
+                <*> (option maybe $ short 'p' <> metavar "PRETRAINED" <> showDefault <> value Nothing)
+  where
+    maybe = maybeReader (Just . Just)
 
 default_initializer :: Initializer Float
 default_initializer name shp
@@ -49,26 +55,36 @@ default_initializer name shp
 
 main :: IO ()
 main = do
-    ProgArg model <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "CIFAR-10 solver")
+    ProgArg model pretrained <- execParser $ info
+        (cmdArgParser <**> helper) (fullDesc <> header "CIFAR-10 solver")
+
     -- call mxListAllOpNames can ensure the MXNet itself is properly initialized
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
     net  <- case model of
               Resnet  -> Resnet.symbol 10 50 32
               Resnext -> Resnext.symbol
+
+    fixed <- case pretrained of
+        Nothing -> return S.empty
+        Just _  -> fixedParams net model
+
     sess <- initialize @"cifar10" net $ Config {
                 _cfg_data = M.singleton "x" [3,32,32],
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
-                _cfg_fixed_params = S.fromList [],
+                _cfg_fixed_params = fixed,
                 _cfg_context = contextGPU0
             }
 
     -- cbTP <- dumpThroughputEpoch
     -- sess <- return $ (sess_callbacks %~ ([cbTP, Callback (Checkpoint "tmp")] ++)) sess
 
-    optimizer <- makeOptimizer ADAM (lrOfPoly $ #maxnup := 10000 .& #base := 0.03 .& #power := 1 .& Nil) Nil
+    let lr_scheduler = lrOfMultifactor $ #steps := [100, 200, 300]
+                                      .& #base := 0.0001
+                                      .& #factor:= 0.75 .& Nil
+    optimizer <- makeOptimizer SGD'Mom lr_scheduler Nil
     metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
 
     train sess $ do
@@ -76,6 +92,10 @@ main = do
         let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
                                          .& #data_shape  := [3,32,32]
                                          .& #batch_size  := 128 .& Nil) :: DS
+
+        case pretrained of
+            Just path -> loadState path ["output.weight", "output.bias"]
+            Nothing -> return ()
 
         forM_ [1..100::Int] $ \ ei -> do
             liftIO $ putStrLn $ "Epoch " ++ show ei
@@ -91,3 +111,15 @@ main = do
 
             saveState (ei == 1) (printf "checkpoints/cifar10_resnet50_epoch_%03d" ei)
             liftIO $ putStrLn ""
+
+fixedParams symbol _ = do
+    argnames <- listArguments symbol
+    return $ S.fromList [n | n <- argnames
+                        -- fix conv_0, stage_1_*, *_gamma, *_beta
+                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+
+  where
+    layer param = case T.splitOn "." $ T.pack param of
+                    "features":n:_ -> n
+                    _ -> "<na>"
+    name  param = last $ T.splitOn "." $ T.pack param
