@@ -48,6 +48,7 @@ import Model.ProposalTarget
 import qualified DataIter.Coco as Coco
 import qualified MXNet.NN.DataIter.Coco as Coco
 
+import Debug.Trace
 
 data ProgConfig = ProgConfig {
     ds_base_path       :: String,
@@ -122,11 +123,13 @@ default_initializer name = case name of
     "rpn_cls_score.bias"   -> zeros name
     "rpn_bbox_pred.weight" -> normal 0.01 name
     "rpn_bbox_pred.bias"   -> zeros name
-    "cls_score.weight"     -> normal 0.01 name
+    "cls_score.weight"     -> xavier 2.0 XavierGaussian XavierIn name -- normal 0.01 name
     "cls_score.bias"       -> zeros name
     "bbox_pred.weight"     -> normal 0.001 name
     "bbox_pred.bias"       -> zeros name
-    _ -> empty name
+    _ | endsWith ".running_mean" name -> zeros name
+      | endsWith ".running_var"  name -> zeros name
+      | otherwise -> empty name
 
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
@@ -261,14 +264,14 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_context = contextGPU0
     }
 
-    -- optimizer <- makeOptimizer SGD'Mom (Const 0.0001) (#momentum := 0.9
-    --                                                .& #wd := 0.0005
-    --                                                .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
-    --                                                .& #clip_gradient := 5
-    --                                                .& Nil)
-    optimizer <- makeOptimizer ADAM (Factor 0.001 0.5 500 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
-                                                                   .& #clip_gradient := 5
-                                                                   .& Nil)
+    optimizer <- makeOptimizer SGD'Mom (Factor 0.001 0.5 2000 0.000001) (#momentum := 0.9
+                                                   .& #wd := 0.0005
+                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+                                                   .& #clip_gradient := 5
+                                                   .& Nil)
+    -- optimizer <- makeOptimizer ADAM (Factor 0.002 0.5 1000 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+    --                                                                .& #clip_gradient := 5
+    --                                                                .& Nil)
 
     runResourceT $ flip runReaderT coco_conf $ train sess $ do
         -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
