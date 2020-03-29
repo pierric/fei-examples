@@ -309,7 +309,6 @@ instance EvalMetricMethod RCNNAccMetric where
             pairs_fg  = UV.filter ((>0) . fst) pairs_all
             equal_fg  = UV.filter (uncurry (==)) pairs_fg
 
-        -- print (UV.map (bimap floor floor) pairs_all :: UV.Vector (Int, Int))
         print (UV.map (bimap floor floor) pairs_fg :: UV.Vector (Int, Int))
 
         let ref_acc_all = _rcnn_acc_all rcnn_acc

@@ -123,7 +123,7 @@ default_initializer name = case name of
     "rpn_cls_score.bias"   -> zeros name
     "rpn_bbox_pred.weight" -> normal 0.01 name
     "rpn_bbox_pred.bias"   -> zeros name
-    "cls_score.weight"     -> xavier 2.0 XavierGaussian XavierIn name -- normal 0.01 name
+    "cls_score.weight"     -> normal 0.01 name
     "cls_score.bias"       -> zeros name
     "bbox_pred.weight"     -> normal 0.001 name
     "bbox_pred.bias"       -> zeros name
@@ -159,7 +159,8 @@ fixedParams backbone stage symbol = do
                                         , layer n `elem` ["0", "2", "5", "7"]]
         (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+                                        -- , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+                                        , layer n `elem` ["1", "5"]]
         (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
@@ -234,7 +235,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     coco_inst <- Coco.coco ds_base_path "train2017"
 
-    let fixed_num_gt = if rcnn_batch_size == 1 then Nothing else Just 10
+    let fixed_num_gt = if rcnn_batch_size == 1 then Nothing else Just 50
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTuple ds_img_pixel_means) (toTuple ds_img_pixel_stds)
         anchors = Coco.withAnchors (#batch_size     := (rcnn_batch_size :: Int)
@@ -264,12 +265,12 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_context = contextGPU0
     }
 
-    optimizer <- makeOptimizer SGD'Mom (Factor 0.001 0.5 2000 0.000001) (#momentum := 0.9
+    optimizer <- makeOptimizer SGD'Mom (Factor 0.001 0.5 4000 0.000001) (#momentum := 0.9
                                                    .& #wd := 0.0005
                                                    .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
                                                    .& #clip_gradient := 5
                                                    .& Nil)
-    -- optimizer <- makeOptimizer ADAM (Factor 0.002 0.5 1000 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+    -- optimizer <- makeOptimizer ADAM (Factor 0.0001 0.5 5000 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
     --                                                                .& #clip_gradient := 5
     --                                                                .& Nil)
 

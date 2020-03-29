@@ -95,6 +95,7 @@ Executable rcnn
                       , fei-nn
                       , fei-cocoapi
                       , fei-datasets
+                      , pretty
   default-extensions:   OverloadedLabels
                       , TypeFamilies
                       , FlexibleContexts
