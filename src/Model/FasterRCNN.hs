@@ -9,6 +9,7 @@ import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Unboxed as UV
 import qualified Data.HashMap.Strict as M
 import Data.IORef
+import Data.Bifunctor
 import Data.Array.Repa.Index
 import Data.Array.Repa.Shape
 import qualified Data.Array.Repa as Repa
@@ -262,22 +263,30 @@ instance EvalMetricMethod RPNAccMetric where
 data RCNNAccMetric a = RCNNAccMetric Int Int
 
 instance EvalMetricMethod RCNNAccMetric where
-    data MetricData RCNNAccMetric a = RCNNAccMetricData String Int Int (IORef Int) (IORef Int)
+    data MetricData RCNNAccMetric a = RCNNAccMetricData {
+        _rcnn_acc_phase :: String,
+        _rcnn_acc_cindex :: Int,
+        _rcnn_acc_lindex :: Int,
+        _rcnn_acc_all :: IORef (Int, Int),
+        _rcnn_acc_fg  :: IORef (Int, Int)
+    }
     newMetric phase (RCNNAccMetric cindex lindex) = do
-        a <- liftIO $ newIORef 0
-        b <- liftIO $ newIORef 0
+        a <- liftIO $ newIORef (0, 0)
+        b <- liftIO $ newIORef (0, 0)
         return $ RCNNAccMetricData phase cindex lindex a b
 
-    format (RCNNAccMetricData _ _ _ cntRef sumRef) = liftIO $ do
-        s <- liftIO $ readIORef sumRef
-        n <- liftIO $ readIORef cntRef
-        return $ printf "<RCNNAcc: %0.2f>" (100 * fromIntegral s / fromIntegral n :: Float)
+    format (RCNNAccMetricData _ _ _ accum_all accum_fg) = liftIO $ do
+        (all_s, all_n) <- liftIO $ readIORef accum_all
+        (fg_s, fg_n)   <- liftIO $ readIORef accum_fg
+        return $ printf "<RCNNAcc: %0.2f %0.2f>"
+            (100 * fromIntegral all_s / fromIntegral all_n :: Float)
+            (100 * fromIntegral fg_s  / fromIntegral fg_n  :: Float)
 
-    evaluate (RCNNAccMetricData phase cindex lindex cntRef sumRef) bindings outputs = liftIO $  do
+    evaluate rcnn_acc bindings outputs = liftIO $  do
         -- cls_prob: (batch_size, #num_anchors*feat_w*feat_h, #num_classes)
         -- label:    (batch_size, #num_anchors*feat_w*feat_h)
-        let cls_prob = outputs !! cindex
-            label    = outputs !! lindex
+        let cls_prob = outputs !! _rcnn_acc_cindex rcnn_acc
+            label    = outputs !! _rcnn_acc_lindex rcnn_acc
 
         cls_prob <- A.makeNDArrayLike cls_prob contextCPU >>= A.copy cls_prob
         [pred_class] <- argmax (#data := unNDArray cls_prob .& #axis := Just 2 .& Nil)
@@ -294,16 +303,28 @@ instance EvalMetricMethod RCNNAccMetric where
         pred_class <- toRepa @DIM2 (NDArray pred_class)
         label <- toRepa @DIM2 label
 
-        let pairs = UV.zip (Repa.toUnboxed label) (Repa.toUnboxed pred_class)
-            equal = UV.filter (uncurry (==)) pairs
+        let pairs_all = UV.zip (Repa.toUnboxed label) (Repa.toUnboxed pred_class)
+            equal_all = UV.filter (uncurry (==)) pairs_all
 
-        modifyIORef' sumRef (+ UV.length equal)
-        modifyIORef' cntRef (+ UV.length pairs)
+            pairs_fg  = UV.filter ((>0) . fst) pairs_all
+            equal_fg  = UV.filter (uncurry (==)) pairs_fg
 
-        s <- readIORef sumRef
-        n <- readIORef cntRef
-        let acc = fromIntegral s / fromIntegral n
-        return $ M.singleton (phase ++ "_acc") acc
+        -- print (UV.map (bimap floor floor) pairs_all :: UV.Vector (Int, Int))
+        print (UV.map (bimap floor floor) pairs_fg :: UV.Vector (Int, Int))
+
+        let ref_acc_all = _rcnn_acc_all rcnn_acc
+            ref_acc_fg  = _rcnn_acc_fg  rcnn_acc
+        modifyIORef' ref_acc_all (bimap (+ UV.length equal_all) (+ UV.length pairs_all))
+        modifyIORef' ref_acc_fg  (bimap (+ UV.length equal_fg)  (+ UV.length pairs_fg))
+
+        (all_s, all_n) <- readIORef ref_acc_all
+        (fg_s,  fg_n)  <- readIORef ref_acc_fg
+        let all_acc = fromIntegral all_s / fromIntegral all_n
+            fg_acc  = fromIntegral fg_s  / fromIntegral fg_n
+            phase   = _rcnn_acc_phase rcnn_acc
+        return $ M.fromList [
+            (phase ++ "_with_bg_acc", all_acc),
+            (phase ++ "_fg_only_acc", fg_acc)]
 
 data RPNLogLossMetric a = RPNLogLossMetric Int String
 
