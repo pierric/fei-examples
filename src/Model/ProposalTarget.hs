@@ -16,9 +16,15 @@ import Data.Array.Repa.Shape
 import Data.Array.Repa.Slice
 import Data.Random (shuffle, runRVar, StdRandom(..))
 import Data.Random.Vector (randomElement)
+import Text.PrettyPrint
+import Text.PrettyPrint.HughesPJClass
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
+
+instance (Pretty e, UV.Unbox e, Shape d) => Pretty (Repa.Array Repa.U d e) where
+    pPrint arr = text (Repa.showShape $ Repa.extent arr) <+> pPrint (UV.toList $ Repa.toUnboxed arr)
+
 
 data ProposalTargetProp = ProposalTargetProp {
     _num_classes :: Int,
@@ -64,7 +70,7 @@ instance CustomOperation (Operation ProposalTargetProp) where
         assert (batch_size == length r_gt) (return ())
 
         (rois, labels, bbox_targets, bbox_weights) <- V.unzip4 <$> V.mapM (sample_batch r_rois r_gt) (V.enumFromN (0 :: Int) batch_size)
-        let rois'   = vstack $ V.map (Repa.reshape (Z :. 1 :. 5)) $ join rois
+        let rois'   = vstack $ V.map (Repa.computeUnboxedS . Repa.reshape (Z :. 1 :. 5)) $ join rois
             labels' = join labels
             bbox_targets' = vstack bbox_targets
             bbox_weights' = vstack bbox_weights
@@ -238,9 +244,11 @@ bboxTransform [std0, std1, std2, std3] box1 box2 =
 (#!) = Repa.linearIndex
 (%!) = (V.!)
 
-vstack :: Repa.Source r Float => V.Vector (Repa.Array r Repa.DIM2 Float) -> Repa.Array Repa.D Repa.DIM2 Float
-vstack = Repa.transpose . V.foldl1 (Repa.++) . V.map Repa.transpose
-
+vstack :: V.Vector (Repa.Array Repa.U Repa.DIM2 Float) -> Repa.Array Repa.U Repa.DIM2 Float
+-- vstack = Repa.transpose . V.foldl1 (Repa.++) . V.map Repa.transpose
+vstack arrs = let sum_shp (Z:.a:.b) (Z:.c:.d) | b == d = Z:.(a+c):.b
+                  shp = V.foldl1' sum_shp $ V.map Repa.extent arrs
+              in Repa.fromUnboxed shp $ UV.concat $ V.toList $ V.map Repa.toUnboxed arrs
 
 test_sample_rois = let
         v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]
