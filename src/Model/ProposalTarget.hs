@@ -11,6 +11,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as UV
 import qualified Data.Vector.Unboxed.Mutable as UVM
 import qualified Data.Array.Repa as Repa
+import Data.Array.Repa (Array, U, D)
 import Data.Array.Repa.Index
 import Data.Array.Repa.Shape
 import Data.Array.Repa.Slice
@@ -22,17 +23,17 @@ import Text.PrettyPrint.HughesPJClass
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
 
-instance (Pretty e, UV.Unbox e, Shape d) => Pretty (Repa.Array Repa.U d e) where
+instance (Pretty e, UV.Unbox e, Shape d) => Pretty (Array U d e) where
     pPrint arr = text (Repa.showShape $ Repa.extent arr) <+> pPrint (UV.toList $ Repa.toUnboxed arr)
 
 
 data ProposalTargetProp = ProposalTargetProp {
-    _num_classes :: Int,
-    _batch_images :: Int,
-    _batch_rois :: Int,
-    _fg_fraction :: Float,
-    _fg_overlap :: Float,
-    _box_stds :: [Float]
+    _pt_num_classes :: Int,
+    _pt_batch_images :: Int,
+    _pt_batch_rois :: Int,
+    _pt_fg_fraction :: Float,
+    _pt_fg_overlap :: Float,
+    _pt_box_stds :: [Float]
 }
 makeLenses ''ProposalTargetProp
 
@@ -41,8 +42,8 @@ instance CustomOperationProp ProposalTargetProp where
     prop_list_outputs _          = ["rois_output", "label", "bbox_target", "bbox_weight"]
     prop_list_auxiliary_states _ = []
     prop_infer_shape prop [rpn_rois_shape, gt_boxes_shape] =
-        let prop_batch_size   = prop ^. batch_rois
-            prop_num_classes  = prop ^. num_classes
+        let prop_batch_size   = prop ^. pt_batch_rois
+            prop_num_classes  = prop ^. pt_num_classes
             output_rois_shape = [prop_batch_size, 5]
             label_shape       = [prop_batch_size]
             bbox_target_shape = [prop_batch_size, prop_num_classes * 4]
@@ -61,7 +62,7 @@ instance CustomOperation (Operation ProposalTargetProp) where
         -- :param: gt_boxes, shape of (N, M, 5), M varies per image. [bbox0, bbox1, bbox2, bbox3, class]
         let [rois, gt_boxes] = inputs
             [rois_output, label_output, bbox_target_output, bbox_weight_output] = outputs
-            batch_size = prop ^. batch_images
+            batch_size = prop ^. pt_batch_images
 
         -- convert NDArray to Vector of Repa array.
         r_rois   <- toRepa @DIM2 (NDArray rois)     >>= return . toRows2
@@ -98,35 +99,33 @@ instance CustomOperation (Operation ProposalTargetProp) where
                           range = V.enumFromN (0 :: Int) rows
                       in V.map (\i -> Repa.computeUnboxedS $ Repa.slice arr (Z :. i :. All :. All)) range
 
-        sample_batch :: V.Vector (Repa.Array Repa.U DIM1 Float) -> V.Vector (Repa.Array _ DIM2 Float) -> Int -> IO (_, _, _, _)
+        sample_batch :: V.Vector (Array U DIM1 Float) -> V.Vector (Array _ DIM2 Float) -> Int -> IO (_, _, _, _)
         sample_batch r_rois r_gt index = do
             let rois_this_image   = V.filter (\roi -> floor (roi #! 0) == index) r_rois
                 all_gt_this_image = toRows2 $ r_gt %! index
                 gt_this_image     = V.filter (\gt  -> gt  #! 4 > 0) all_gt_this_image
-
-            let num_rois_per_image = (prop ^. batch_rois) `div` (prop ^. batch_images)
-                fg_rois_per_image = round (prop ^. fg_fraction * fromIntegral num_rois_per_image)
 
             -- WHY?
             -- append gt boxes to rois
             let prepend_index = Repa.computeUnboxedS . (Repa.fromListUnboxed (Z :. 1) [fromIntegral index] Repa.++)
                 gt_boxes_as_rois = V.map (\gt -> prepend_index $ Repa.extract (Z :. 0) (Z :. 4) gt) gt_this_image
                 rois_this_image' = rois_this_image V.++ gt_boxes_as_rois
+                box_stds_repa = (prop ^. pt_box_stds)
 
-            sample_rois rois_this_image' gt_this_image
-                (prop ^. num_classes) num_rois_per_image fg_rois_per_image (prop ^. fg_overlap) (prop ^. box_stds)
+            sample_rois rois_this_image' gt_this_image prop
 
     backward _ [ReqWrite, ReqWrite] _ _ [in_grad_0, in_grad_1] _ _ = do
         _set_value_upd [in_grad_0] (#src := 0 .& Nil)
         _set_value_upd [in_grad_1] (#src := 0 .& Nil)
 
 
-sample_rois :: V.Vector (Repa.Array Repa.U DIM1 Float) -> V.Vector (Repa.Array Repa.U DIM1 Float) -> Int -> Int -> Int -> Float -> [Float]
-            -> IO (V.Vector (Repa.Array Repa.U Repa.DIM1 Float),
+sample_rois :: V.Vector (Array U DIM1 Float) -> V.Vector (Array U DIM1 Float)
+            -> ProposalTargetProp
+            -> IO (V.Vector (Array U DIM1 Float),
                    V.Vector Float,
-                   Repa.Array _ Repa.DIM2 Float,
-                   Repa.Array _ Repa.DIM2 Float)
-sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_stds = do
+                   Array _ DIM2 Float,
+                   Array _ DIM2 Float)
+sample_rois rois gt prop = do
     -- :param rois: [num_rois, 5] (batch_index, x1, y1, x2, y2)
     -- :param gt: [num_rois, 5] (x1, y1, x2, y2, cls)
     --
@@ -161,10 +160,10 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     let keep_indexes = V.map fst $ fg_indexes V.++ bg_indexes
 
         rois_keep    = V.map (rois %!) keep_indexes
-        roi_box_keep = V.map (asTuple . Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois_keep
+        roi_box_keep = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois_keep
 
         gt_keep      = V.map (gt_chosen  %!) keep_indexes
-        gt_box_keep  = V.map (asTuple . Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt_keep
+        gt_box_keep  = V.map (Repa.computeUnboxedS . Repa.extract (Z:.0) (Z:.4)) gt_keep
         labels_keep  = V.take (length fg_indexes) (V.map (#! 4) gt_keep) V.++ V.replicate bg_rois_this_image 0
 
         targets = V.zipWith (bboxTransform box_stds) roi_box_keep gt_box_keep
@@ -176,13 +175,13 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
     -- only assign regression and weights for the foreground boxes.
     forM_ [0..length fg_indexes-1] $ \i -> do
         let lbl = floor (labels_keep %! i)
-            (tgt0, tgt1, tgt2, tgt3) = targets %! i :: Box
+            tgt = targets %! i :: RBox
         assert (lbl >= 0 && lbl < num_classes) (return ())
         let tgt_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_target
-        UVM.write tgt_dst 0 tgt0
-        UVM.write tgt_dst 1 tgt1
-        UVM.write tgt_dst 2 tgt2
-        UVM.write tgt_dst 3 tgt3
+        UVM.write tgt_dst 0 (tgt #! 0)
+        UVM.write tgt_dst 1 (tgt #! 1)
+        UVM.write tgt_dst 2 (tgt #! 2)
+        UVM.write tgt_dst 3 (tgt #! 3)
         let wgh_dst = UVM.slice (i * 4 * num_classes + 4 * lbl) 4 bbox_weight
         UVM.set wgh_dst 1
 
@@ -193,8 +192,13 @@ sample_rois rois gt num_classes rois_per_image fg_rois_per_image fg_overlap box_
 
   where
     runRVar' = flip runRVar StdRandom
+    num_classes = prop ^. pt_num_classes
+    rois_per_image = (prop ^. pt_batch_rois) `div` (prop ^. pt_batch_images)
+    fg_rois_per_image = round (prop ^. pt_fg_fraction * fromIntegral rois_per_image)
+    fg_overlap = prop ^. pt_fg_overlap
+    box_stds = Repa.fromListUnboxed (Z:.4) (prop ^. pt_box_stds)
 
-overlapMatrix :: V.Vector (Repa.Array Repa.U Repa.DIM1 Float) -> V.Vector (Repa.Array Repa.U Repa.DIM1 Float) -> Repa.Array Repa.D Repa.DIM2 Float
+overlapMatrix :: V.Vector (Array U DIM1 Float) -> V.Vector (Array U DIM1 Float) -> Array D DIM2 Float
 overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
   where
     width  = length rois
@@ -218,49 +222,69 @@ argMax overlaps =
         findMax row = UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. row :. All)
     in V.map findMax $ V.enumFromN (0 :: Int) m
 
-type Box = (Float, Float, Float, Float)
-whctr :: Box -> Box
-whctr (x0, y0, x1, y1) = (w, h, x, y)
+whctr :: RBox -> RBox
+whctr box1 = Repa.fromListUnboxed (Z:.4) [w, h, x, y]
   where
+    [x0, y0, x1, y1] = Repa.toList box1
     w = x1 - x0 + 1
     h = y1 - y0 + 1
     x = x0 + 0.5 * (w - 1)
     y = y0 + 0.5 * (h - 1)
 
-asTuple :: Repa.Array Repa.U Repa.DIM1 Float -> (Float, Float, Float, Float)
-asTuple box = (box #! 0, box #! 1, box #! 2, box #! 3)
+bboxTransform :: RBox -> RBox -> RBox -> RBox
+bboxTransform stds box1 box2 =
+    let [w1, h1, cx1, cy1] = Repa.toList $ whctr box1
+        [w2, h2, cx2, cy2] = Repa.toList $ whctr box2
+        dx = (cx2 - cx1) / (w1 + 1e-14)
+        dy = (cy2 - cy1) / (h1 + 1e-14)
+        dw = log (w2 / w1)
+        dh = log (h2 / h1)
+    in Repa.computeS $ Repa.fromListUnboxed (Z:.4) [dx, dy, dw, dh] Repa./^ stds
 
-bboxTransform :: [Float] -> Box -> Box -> Box
-bboxTransform [std0, std1, std2, std3] box1 box2 =
-    let (w1, h1, cx1, cy1) = whctr box1
-        (w2, h2, cx2, cy2) = whctr box2
-        dx = (cx2 - cx1) / (w1 + 1e-14) / std0
-        dy = (cy2 - cy1) / (h1 + 1e-14) / std1
-        dw = log (w2 / w1) / std2
-        dh = log (h2 / h1) / std3
-    in (dx, dy, dw, dh)
 
-(#!) :: (Shape sh, UV.Unbox e) => Repa.Array Repa.U sh e -> Int -> e
+type RBox = Array U DIM1 Float
+
+ctrwh :: RBox -> RBox
+ctrwh box1 = Repa.fromListUnboxed (Z:.4) [x0, y0, x1, y1]
+  where
+    [w, h, cx, cy] = Repa.toList box1
+    x0 = cx - 0.5 * (w - 1)
+    y0 = cy - 0.5 * (h - 1)
+    x1 = w + x0 - 1
+    y1 = h + y0 - 1
+
+bboxTransInv :: RBox -> RBox -> RBox -> RBox
+bboxTransInv stds box delta =
+    let [dx, dy, dw, dh] = Repa.toList $ delta Repa.*^ stds
+        [w1, h1, cx1, cy1] = Repa.toList $ whctr box
+        w2 = exp dw * w1
+        h2 = exp dh * w2
+        cx2 = dx * w1 + cx1
+        cy2 = dy * h1 + cy1
+    in ctrwh $ Repa.fromListUnboxed (Z:.4) [w2, h2, cx2, cy2]
+
+
+(#!) :: (Shape sh, UV.Unbox e) => Array U sh e -> Int -> e
 (#!) = Repa.linearIndex
 (%!) = (V.!)
 
-vstack :: V.Vector (Repa.Array Repa.U Repa.DIM2 Float) -> Repa.Array Repa.U Repa.DIM2 Float
+vstack :: V.Vector (Array U DIM2 Float) -> Array U DIM2 Float
 -- vstack = Repa.transpose . V.foldl1 (Repa.++) . V.map Repa.transpose
 vstack arrs = let sum_shp (Z:.a:.b) (Z:.c:.d) | b == d = Z:.(a+c):.b
                   shp = V.foldl1' sum_shp $ V.map Repa.extent arrs
               in Repa.fromUnboxed shp $ UV.concat $ V.toList $ V.map Repa.toUnboxed arrs
 
-test_sample_rois = let
-        v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]
-        v2 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 2.2, 2.2, 4.5, 4.5]
-        v3 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 4.2, 1, 6.5, 2.8]
-        v4 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 6, 3, 7, 4]
-        rois = V.fromList [v1, v2, v3, v4]
-        g1 = Repa.fromListUnboxed (Z:.5::DIM1) [1,1,2,2,1]
-        g2 = Repa.fromListUnboxed (Z:.5::DIM1) [2,3,3,4,1]
-        g3 = Repa.fromListUnboxed (Z:.5::DIM1) [4,1,6,3,2]
-        gt_boxes = V.fromList [g1, g2, g3]
-      in sample_rois rois gt_boxes 3 6 2 0.5 [0.1, 0.1, 0.1, 0.1]
+-- test_sample_rois = let
+--         v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]
+--         v2 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 2.2, 2.2, 4.5, 4.5]
+--         v3 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 4.2, 1, 6.5, 2.8]
+--         v4 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 6, 3, 7, 4]
+--         rois = V.fromList [v1, v2, v3, v4]
+--         g1 = Repa.fromListUnboxed (Z:.5::DIM1) [1,1,2,2,1]
+--         g2 = Repa.fromListUnboxed (Z:.5::DIM1) [2,3,3,4,1]
+--         g3 = Repa.fromListUnboxed (Z:.5::DIM1) [4,1,6,3,2]
+--         gt_boxes = V.fromList [g1, g2, g3]
+--       in sample_rois rois gt_boxes 3 6 2 0.5 [0.1, 0.1, 0.1, 0.1]
 
 
 
