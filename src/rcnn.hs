@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeApplications #-}
@@ -15,6 +16,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 import Control.Monad.Reader
 import Control.Lens ((.=), (^.), use)
+import Control.Monad.ST (runST, ST)
 import System.IO (hFlush, stdout)
 import Options.Applicative (
     Parser, execParser,
@@ -27,7 +29,12 @@ import qualified Data.Conduit.List as C
 import System.Directory (doesFileExist, canonicalizePath)
 import Text.Printf (printf)
 import qualified Data.Vector as V
+import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Mutable as VM
+import qualified Data.Vector.Algorithms.Intro as VA
 import Data.List (sort)
+import qualified Data.Array.Repa as Repa
+import Data.Array.Repa (DIM1, DIM2, DIM3, Z(..), (:.)(..))
 
 import MXNet.Base (
     NDArray(..), Symbol, toVector, execForward,
@@ -36,6 +43,7 @@ import MXNet.Base (
     registerCustomOperator,
     ndshape,
     listArguments, listOutputs, internals, inferShape, at', at,
+    toRepa,
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN hiding (reshape)
@@ -43,12 +51,16 @@ import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.Utils (loadState, saveState)
 import MXNet.NN.NDArray (reshape)
-import Model.FasterRCNN
-import Model.ProposalTarget
+import MXNet.NN.ModelZoo.RCNN.FasterRCNN
+import MXNet.NN.ModelZoo.RCNN.ProposalTarget
+import MXNet.NN.ModelZoo.Utils.Repa
+import MXNet.NN.ModelZoo.Utils.Box
 import qualified DataIter.Coco as Coco
 import qualified MXNet.NN.DataIter.Coco as Coco
 
 import Debug.Trace
+import Data.Array.Repa (Array, U, Shape)
+import Text.PrettyPrint.ANSI.Leijen (putDoc, Pretty(..))
 
 data ProgConfig = ProgConfig {
     ds_base_path       :: String,
@@ -103,12 +115,12 @@ cmdArgParser = liftA2 (,)
 buildProposalTargetProp params = do
     let params' = M.fromList params
     return $ ProposalTargetProp {
-        _num_classes = read $ params' M.! "num_classes",
-        _batch_images= read $ params' M.! "batch_images",
-        _batch_rois  = read $ params' M.! "batch_rois",
-        _fg_fraction = read $ params' M.! "fg_fraction",
-        _fg_overlap  = read $ params' M.! "fg_overlap",
-        _box_stds    = read $ params' M.! "box_stds"
+        _pt_num_classes = read $ params' M.! "num_classes",
+        _pt_batch_images= read $ params' M.! "batch_images",
+        _pt_batch_rois  = read $ params' M.! "batch_rois",
+        _pt_fg_fraction = read $ params' M.! "fg_fraction",
+        _pt_fg_overlap  = read $ params' M.! "fg_overlap",
+        _pt_box_stds    = read $ params' M.! "box_stds"
     }
 
 toTriple [a, b, c] = (a, b, c)
@@ -185,6 +197,7 @@ main = do
 mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym <- symbolInfer rcnn_conf
     fixed_params <- fixedParams backbone INFERENCE sym
+    fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
     sess <- initialize @"fastrcnn" sym $ Config {
@@ -203,9 +216,9 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTuple ds_img_pixel_means) (toTuple ds_img_pixel_stds)
     runResourceT $ flip runReaderT coco_conf $ train sess $ do
-        Just (img_ident, img_tensor, img_info) <- Coco.loadImage img
-        img_tensor <- liftIO $ Coco.repaToNDArray img_tensor
-        img_info   <- liftIO $ Coco.repaToNDArray img_info
+        Just (img_ident, img_tensor_r, img_info_r) <- Coco.loadImage img
+        img_tensor <- liftIO $ Coco.repaToNDArray img_tensor_r
+        img_info   <- liftIO $ Coco.repaToNDArray img_info_r
 
         img_tensor <- liftIO $ ndshape img_tensor >>= reshape img_tensor . (1:)
         img_info   <- liftIO $ ndshape img_info   >>= reshape img_info   . (1:)
@@ -220,10 +233,84 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                          , ("im_info", img_info)]
                 [rois, cls_prob, bbox_pred] <- forwardOnly binding
                 liftIO $ do
-                    ndshape rois >>= print
-                    ndshape cls_prob >>= print
-                    ndshape bbox_pred >>= print
+                    rois     <- toRepa @DIM2 rois       -- [NUM_ROIS, 5]
+                    cls_prob <- toRepa @DIM2 cls_prob   -- [NUM_ROIS, NUM_CLASSES]
+                    deltas   <- toRepa @DIM2 bbox_pred  -- [NUM_ROIS, NUM_CLASSES*4]
+
+                    let box_stds = Repa.fromListUnboxed (Z :. 4 :: DIM1) rcnn_bbox_stds
+                        rois' = Repa.computeS $ Repa.traverse rois
+                                    (\(Z :. n :. 5) -> Z :. n :. 4)
+                                    (\lk (Z:.i:.j) -> lk (Z:.i:.(j+1)))
+                        deltas' = reshapeEx (Z :. 0 :. (-1) :. 4 :: DIM3) deltas
+                        pred_boxes = decodeBoxes rois' deltas' box_stds img_info_r
+                        (cls_ids, cls_scores) = decodeScores cls_prob 1e-3
+                        res = cls_ids Repa.++ cls_scores Repa.++ pred_boxes
+                        -- exlcude background class 0
+                        -- and transpose from [NUM_ROIS, NUM_CLASSES_FG, 6] to [NUM_CLASSES_FG, NUM_ROIS, 6]
+                        res_no_bg = Repa.traverse res
+                                        (\(Z:.i:.j:.k) -> Z:.(j-1):.i:.k)
+                                        (\lk (Z:.j:.i:.k) -> lk (Z:.i:.(j+1):.k))
+
+                        -- nms the boxes
+                        res_out = V.concatMap (nmsBoxes 0.3) $ vunstack $
+                                        Repa.computeS res_no_bg
+
+                        -- keep only those with confidence >= 0.7
+                        res_good = V.filter ((>= 0.7) . (#! 1)) $ res_out
+                    putDoc . pretty $ V.toList res_good
+                    print $ length res_good
+                    -- putStrLn $ prettyShow $ V.toList $ V.concatMap vunstack a
+                    -- putDoc . pretty $ V.toList $ vunstack cls_prob
                     print $ "Done: " ++ img_ident
+
+  where
+    decodeBoxes rois deltas box_stds im_info =
+        -- rois: [N, 4]
+        -- deltas: [N, NUM_CLASSES, 4]
+        -- box_stds: [4]
+        -- return: [N, NUM_CLASSES, 4]
+        let [height, width, scale] = Repa.toList im_info :: [Float]
+            shape = Repa.extent deltas
+            eachClass roi = (Repa.computeS . Repa.map (/ scale)) . bboxClip height width . bboxTransInv box_stds roi
+            eachROI roi = V.map (eachClass roi) . vunstack
+            pred_boxes = V.zipWith eachROI (vunstack rois) (vunstack deltas)
+        in Repa.computeUnboxedS $ Repa.reshape shape $ vstack $ V.concat $ V.toList pred_boxes
+
+    decodeScores :: Array U DIM2 Float -> Float -> (Array U DIM3 Float, Array U DIM3 Float)
+    decodeScores cls_prob thr =
+        let Z:.num_rois:.num_classes = Repa.extent cls_prob
+            cls_id = Repa.fromUnboxed (Z:.1:.num_classes) $ VU.enumFromN 0 num_classes
+            -- cls_ids :: [NUM_ROIS, NUM_CLASSES]
+            cls_ids = vstack $ V.replicate num_rois cls_id
+            -- cls_scores :: [NUM_ROIS, NUM_CLASSES]
+            cls_ids_masked = Repa.computeS $ Repa.zipWith (\v1 v2 -> if v2 >= thr then v1 else (-1)) cls_ids cls_prob
+            cls_scs_masked = Repa.computeS $ Repa.map (\v -> if v >= thr then v else 0) cls_prob
+        in (reshapeEx (Z:.0:.0:.1) cls_ids_masked, reshapeEx (Z:.0:.0:.1) cls_scs_masked)
+
+    nmsBoxes :: Float -> Array U DIM2 Float -> V.Vector (Array U DIM1 Float)
+    nmsBoxes threshold boxes = runST $ do
+        items <- V.thaw (vunstack boxes)
+        go items
+        V.filter ((/= -1) . (#! 0)) <$> V.freeze items
+      where
+        cmp a b | a #! 0 == -1 = GT
+                | b #! 0 == -1 = LT
+                | otherwise = compare (b #! 1) (a #! 1)
+        go :: VM.MVector s (Array U DIM1 Float) -> ST s ()
+        go items =
+            when (VM.length items > 0) $ do
+                VA.sortBy cmp items
+                box0 <- VM.read items 0
+                when (box0 #! 0 == -1) $ do
+                    items <- return $ VM.tail items
+                    V.forM_ (V.enumFromN 0 (VM.length items)) $ \k -> do
+                        boxK <- VM.read items k
+                        let b1 = Repa.computeS $ Repa.extract (Z:.2) (Z:.4) box0
+                            b2 = Repa.computeS $ Repa.extract (Z:.2) (Z:.4) boxK
+                        when (bboxIOU b1 b2 >= threshold) $ do
+                            let boxK' = Repa.fromUnboxed (Z:.6 :: DIM1) $ Repa.toUnboxed boxK VU.// [(0, -1)]
+                            VM.write items k boxK'
+                    go items
 
 mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     sym  <- symbolTrain rcnn_conf
@@ -265,7 +352,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         _cfg_context = contextGPU0
     }
 
-    optimizer <- makeOptimizer SGD'Mom (Factor 0.001 0.5 4000 0.000001) (#momentum := 0.9
+    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
                                                    .& #wd := 0.0005
                                                    .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
                                                    .& #clip_gradient := 5
