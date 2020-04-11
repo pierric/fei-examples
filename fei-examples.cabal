@@ -22,7 +22,6 @@ source-repository head
 
 Executable lenet
   main-is:              lenet.hs
-  other-modules:        Model.Lenet
   hs-source-dirs:       src
   ghc-options:          -Wall
   default-language:     Haskell2010
@@ -31,14 +30,13 @@ Executable lenet
                       , vector >= 0.12
                       , fei-base
                       , fei-nn
+                      , fei-modelzoo
   default-extensions:   OverloadedLabels
                       , TypeFamilies
 
 
 Executable cifar10
   main-is:              cifar10.hs
-  other-modules:        Model.Resnet,
-                        Model.Resnext
   hs-source-dirs:       src
   ghc-options:          -Wall
   default-language:     Haskell2010
@@ -50,6 +48,7 @@ Executable cifar10
                       , text
                       , fei-base
                       , fei-nn
+                      , fei-modelzoo
   default-extensions:   OverloadedLabels
                       , TypeFamilies
 
@@ -67,11 +66,7 @@ Executable custom-op
                       , FlexibleInstances
 Executable rcnn
   main-is:             rcnn.hs
-  other-modules:       Model.VGG,
-                       Model.Resnet,
-                       Model.FasterRCNN,
-                       Model.ProposalTarget ,
-                       DataIter.Coco
+  other-modules:       DataIter.Coco
   hs-source-dirs:      src
   ghc-options:          -Wall
   default-language:     Haskell2010
@@ -91,11 +86,13 @@ Executable rcnn
                       , deepseq
                       , store
                       , bytestring
+                      , ansi-wl-pprint
+                      , vector-algorithms
                       , fei-base
                       , fei-nn
                       , fei-cocoapi
                       , fei-datasets
-                      , pretty
+                      , fei-modelzoo
   default-extensions:   OverloadedLabels
                       , TypeFamilies
                       , FlexibleContexts

@@ -17,7 +17,7 @@ import qualified MXNet.Base.Operators.NDArray as A
 import MXNet.NN
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
-import qualified Model.Lenet as Model
+import qualified MXNet.NN.ModelZoo.Lenet as Model
 
 type ArrayF = NDArray Float
 type DS = ConduitData (Module "lenet" Float IO) (ArrayF, ArrayF)

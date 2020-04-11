@@ -27,8 +27,8 @@ import MXNet.NN
 import MXNet.NN.Utils
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Streaming
-import qualified Model.Resnet as Resnet
-import qualified Model.Resnext as Resnext
+import qualified MXNet.NN.ModelZoo.Resnet as Resnet
+import qualified MXNet.NN.ModelZoo.Resnext as Resnext
 
 type ArrayF = NDArray Float
 type DS = StreamData (Module "cifar10" Float IO) (ArrayF, ArrayF)

@@ -16,6 +16,7 @@ extra-deps:
 - ../fei-nn
 - ../fei-cocoapi
 - ../fei-datasets
+- ../fei-modelzoo
 - ../tuple-ops
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb

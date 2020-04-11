@@ -2,18 +2,21 @@
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
+import qualified Data.HashSet as S
+
 import MXNet.Base
-import qualified MXNet.Base.Operators.NDArray as A
-import qualified MXNet.Base.Operators.Symbol as S
-import qualified MXNet.NN as NN
-import qualified MXNet.NN.Utils as NN
-import MXNet.NN.DataIter.Class
-import MXNet.NN.DataIter.Streaming
 import qualified Data.HashMap.Strict as M
 import qualified Data.Vector.Storable as SV
 import Control.Monad.IO.Class
 import Control.Monad (forM_, void)
 import System.IO (hFlush, stdout)
+
+import qualified MXNet.Base.Operators.NDArray as A
+import MXNet.Base.Operators.Symbol (_Custom)
+import qualified MXNet.NN as NN
+import qualified MXNet.NN.Utils as NN
+import MXNet.NN.DataIter.Class
+import MXNet.NN.DataIter.Streaming
 
 type ArrayF = NDArray Float
 
@@ -82,7 +85,7 @@ symbol = do
     a3 <- NN.activation "fc1-a"    (#data := v3 .& #act_type := #tanh .& Nil)
 
     v4 <- NN.fullyConnected "fc2"  (#data := a3 .& #num_hidden := 10  .& Nil)
-    a4 <- S._Custom "softmax" (#data := [v4, y] .& #op_type := "softmax_custom" .& Nil)
+    a4 <- _Custom "softmax" (#data := [v4, y] .& #op_type := "softmax_custom" .& Nil)
     return $ Symbol a4
 
 default_initializer :: NN.Initializer Float
@@ -103,6 +106,7 @@ main = do
                 NN._cfg_label = ["y"],
                 NN._cfg_initializers = M.empty,
                 NN._cfg_default_initializer = default_initializer,
+                NN._cfg_fixed_params = S.fromList [],
                 NN._cfg_context = contextCPU
             }
     optimizer <- NN.makeOptimizer NN.SGD'Mom (NN.Const 0.0002) Nil
