@@ -1,12 +1,14 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE ExplicitForAll #-}
 module Model.ProposalTarget where
 
 import Control.Lens ((^.), makeLenses)
 import Control.Monad (replicateM, forM_, join)
-import Control.Exception.Base(assert)
+import Control.Exception.Base(assert, throw, Exception)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as UV
 import qualified Data.Vector.Unboxed.Mutable as UVM
@@ -17,15 +19,13 @@ import Data.Array.Repa.Shape
 import Data.Array.Repa.Slice
 import Data.Random (shuffle, runRVar, StdRandom(..))
 import Data.Random.Vector (randomElement)
-import Text.PrettyPrint
-import Text.PrettyPrint.HughesPJClass
+import Text.PrettyPrint.ANSI.Leijen (putDoc, Pretty(..), (<+>), text)
 
 import MXNet.Base
 import MXNet.Base.Operators.NDArray (_set_value_upd)
 
 instance (Pretty e, UV.Unbox e, Shape d) => Pretty (Array U d e) where
-    pPrint arr = text (Repa.showShape $ Repa.extent arr) <+> pPrint (UV.toList $ Repa.toUnboxed arr)
-
+    pretty arr = text (Repa.showShape $ Repa.extent arr) <+> pretty (UV.toList $ Repa.toUnboxed arr)
 
 data ProposalTargetProp = ProposalTargetProp {
     _pt_num_classes :: Int,
@@ -71,7 +71,7 @@ instance CustomOperation (Operation ProposalTargetProp) where
         assert (batch_size == length r_gt) (return ())
 
         (rois, labels, bbox_targets, bbox_weights) <- V.unzip4 <$> V.mapM (sample_batch r_rois r_gt) (V.enumFromN (0 :: Int) batch_size)
-        let rois'   = vstack $ V.map (Repa.computeUnboxedS . Repa.reshape (Z :. 1 :. 5)) $ join rois
+        let rois'   = vstack $ V.map (Repa.computeUnboxedS . Repa.reshape (Z :. 1 :. 5 :: DIM2)) $ join rois
             labels' = join labels
             bbox_targets' = vstack bbox_targets
             bbox_weights' = vstack bbox_weights
@@ -99,7 +99,6 @@ instance CustomOperation (Operation ProposalTargetProp) where
                           range = V.enumFromN (0 :: Int) rows
                       in V.map (\i -> Repa.computeUnboxedS $ Repa.slice arr (Z :. i :. All :. All)) range
 
-        sample_batch :: V.Vector (Array U DIM1 Float) -> V.Vector (Array _ DIM2 Float) -> Int -> IO (_, _, _, _)
         sample_batch r_rois r_gt index = do
             let rois_this_image   = V.filter (\roi -> floor (roi #! 0) == index) r_rois
                 all_gt_this_image = toRows2 $ r_gt %! index
@@ -110,7 +109,6 @@ instance CustomOperation (Operation ProposalTargetProp) where
             let prepend_index = Repa.computeUnboxedS . (Repa.fromListUnboxed (Z :. 1) [fromIntegral index] Repa.++)
                 gt_boxes_as_rois = V.map (\gt -> prepend_index $ Repa.extract (Z :. 0) (Z :. 4) gt) gt_this_image
                 rois_this_image' = rois_this_image V.++ gt_boxes_as_rois
-                box_stds_repa = (prop ^. pt_box_stds)
 
             sample_rois rois_this_image' gt_this_image prop
 
@@ -123,14 +121,14 @@ sample_rois :: V.Vector (Array U DIM1 Float) -> V.Vector (Array U DIM1 Float)
             -> ProposalTargetProp
             -> IO (V.Vector (Array U DIM1 Float),
                    V.Vector Float,
-                   Array _ DIM2 Float,
-                   Array _ DIM2 Float)
+                   Array U DIM2 Float,
+                   Array U DIM2 Float)
 sample_rois rois gt prop = do
     -- :param rois: [num_rois, 5] (batch_index, x1, y1, x2, y2)
     -- :param gt: [num_rois, 5] (x1, y1, x2, y2, cls)
     --
     -- :returns: sampled (rois, labels, regression, weight)
-    let num_rois = V.length rois
+    -- let num_rois = V.length rois
     -- print(num_rois, V.length gt_boxes)
     -- assert (num_rois == V.length gt_boxes) (return ())
     let aoi_boxes = V.map (Repa.computeUnboxedS . Repa.extract (Z:.1) (Z:.4)) rois
@@ -204,23 +202,35 @@ overlapMatrix rois gt = Repa.fromFunction (Z :. width :. height) calcOvp
     width  = length rois
     height = length gt
 
-    calcArea box = (box #! 2 - box #! 0 + 1) * (box #! 3 - box #! 1 + 1)
-    area1 = V.map calcArea rois
-    area2 = V.map calcArea gt
+    area1 = V.map bboxArea rois
+    area2 = V.map bboxArea gt
 
     calcOvp (Z :. ind_rois :. ind_gt) =
-        let b1 = rois %! ind_rois
-            b2 = gt   %! ind_gt
-            iw = min (b1 #! 2) (b2 #! 2) - max (b1 #! 0) (b2 #! 0) + 1
-            ih = min (b1 #! 3) (b2 #! 3) - max (b1 #! 1) (b2 #! 1) + 1
-            areaI = iw * ih
-            areaU = area1 %! ind_rois + area2 %! ind_gt - areaI
-        in if iw > 0 && ih > 0 then areaI / areaU else 0
+        case bboxIntersect (rois %! ind_rois) (gt   %! ind_gt) of
+           Nothing -> 0
+           Just boxI -> let areaI = bboxArea boxI
+                            areaU = area1 %! ind_rois + area2 %! ind_gt - areaI
+                        in areaI / areaU
 
-argMax overlaps =
-    let Z :. m :. n = Repa.extent overlaps
-        findMax row = UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. row :. All)
-    in V.map findMax $ V.enumFromN (0 :: Int) m
+bboxArea :: RBox -> Float
+bboxArea box = (box #! 2 - box #! 0 + 1) * (box #! 3 - box #! 1 + 1)
+
+bboxIntersect :: RBox -> RBox -> Maybe RBox
+bboxIntersect box1 box2 | not valid = Nothing
+                        | otherwise = Just $ Repa.fromListUnboxed (Z:.4) [x1, y1, x2, y2]
+  where
+    valid = x2 - x1 > 0 && y2 - y1 > 0
+    x1 = max (box1 #! 0) (box2 #! 0)
+    x2 = min (box1 #! 2) (box2 #! 2)
+    y1 = max (box1 #! 1) (box2 #! 1)
+    y2 = min (box1 #! 3) (box2 #! 3)
+
+bboxIOU :: RBox -> RBox -> Float
+bboxIOU box1 box2 = case bboxIntersect box1 box2 of
+                      Nothing -> 0
+                      Just boxI -> let areaI = bboxArea boxI
+                                       areaU = bboxArea box1 + bboxArea box2 - areaI
+                                   in areaI / areaU
 
 whctr :: RBox -> RBox
 whctr box1 = Repa.fromListUnboxed (Z:.4) [w, h, x, y]
@@ -264,15 +274,116 @@ bboxTransInv stds box delta =
     in ctrwh $ Repa.fromListUnboxed (Z:.4) [w2, h2, cx2, cy2]
 
 
+bboxClip :: Float -> Float -> RBox -> RBox
+bboxClip height width box = Repa.fromListUnboxed (Z:.4) [x0', y0', x1', y1']
+  where
+    [x0, y0, x1, y1] = Repa.toList box
+    w' = width - 1
+    h' = height - 1
+    x0' = max 0 (min x0 w')
+    y0' = max 0 (min y0 h')
+    x1' = max 0 (min x1 w')
+    y1' = max 0 (min y1 h')
+
+
 (#!) :: (Shape sh, UV.Unbox e) => Array U sh e -> Int -> e
 (#!) = Repa.linearIndex
+(%!) :: V.Vector a -> Int -> a
 (%!) = (V.!)
 
-vstack :: V.Vector (Array U DIM2 Float) -> Array U DIM2 Float
+expandDim :: (Shape sh, UV.Unbox e) => Int -> Array U sh e -> Array U (sh :. Int) e
+expandDim axis arr | axis >=0 && axis < rank = Repa.computeS $ Repa.reshape shape_new arr
+                   | otherwise = error "Bad axis to expand."
+  where
+    shape = Repa.extent arr
+    rank = Repa.rank shape
+    (h, t) = splitAt (rank - axis) $ Repa.listOfShape shape
+    shape_new = Repa.shapeOfList $ h ++ [1] ++ t
+
+
+vstack :: (Shape sh, UV.Unbox e) => V.Vector (Array U sh e) -> Array U sh e
+-- alternative definition:
 -- vstack = Repa.transpose . V.foldl1 (Repa.++) . V.map Repa.transpose
-vstack arrs = let sum_shp (Z:.a:.b) (Z:.c:.d) | b == d = Z:.(a+c):.b
-                  shp = V.foldl1' sum_shp $ V.map Repa.extent arrs
-              in Repa.fromUnboxed shp $ UV.concat $ V.toList $ V.map Repa.toUnboxed arrs
+vstack arrs = Repa.fromUnboxed shape_new $ UV.concat $ V.toList $ V.map Repa.toUnboxed arrs
+  where
+    sumShape sh1 sh2 = let a1:r1 = reverse $ listOfShape sh1
+                           a2:r2 = reverse $ listOfShape sh2
+                       in if r1 == r2
+                          then shapeOfList $ reverse $ (a1+a2):r1
+                          else error "Cannot stack array because of incompatible shapes"
+    shape_new = V.foldl1' sumShape $ V.map Repa.extent arrs
+
+
+vunstack :: (Unstackable sh, UV.Unbox e) => Array U sh e -> V.Vector (Array U (PredDIM sh) e)
+vunstack arr = V.map (\i -> Repa.computeS $ Repa.slice arr (makeSliceAtAxis0 shape i)) range
+  where
+    shape = Repa.extent arr
+    dim0 = last $ listOfShape shape
+    range = V.enumFromN (0::Int) dim0
+
+class (Shape sh,
+       Shape (PredDIM sh),
+       Slice (SliceAtAxis0 sh),
+       FullShape (SliceAtAxis0 sh) ~ sh,
+       SliceShape (SliceAtAxis0 sh) ~ PredDIM sh
+      ) => Unstackable sh where
+    type PredDIM sh
+    type SliceAtAxis0 sh
+    makeSliceAtAxis0 :: sh -> Int -> SliceAtAxis0 sh
+
+instance Unstackable DIM2 where
+    type PredDIM DIM2 = DIM1
+    type SliceAtAxis0 DIM2 = Z:.Int:.All
+    makeSliceAtAxis0 _ i = Z:.i:.All
+
+instance Unstackable DIM3 where
+    type PredDIM DIM3 = DIM2
+    type SliceAtAxis0 DIM3 = Z:.Int:.All:.All
+    makeSliceAtAxis0 (sh:._) i = makeSliceAtAxis0 sh i :. All
+
+
+data ReshapeError = ReshapeMismatch (V.Vector Int) (V.Vector Int)
+                  | ReshapeTooManyMinusOne (V.Vector Int)
+  deriving Show
+instance Exception ReshapeError
+
+reshapeEx :: (Shape sh1, Shape sh2, UV.Unbox e) => sh2 -> Array U sh1 e -> Array U sh2 e
+reshapeEx shape arr = Repa.computeS $ Repa.reshape (shapeOfList $ V.toList $ V.reverse filled_new_shape) arr
+  where
+    old_shape = V.reverse $ V.fromList $ listOfShape $ Repa.extent arr
+    new_shape = V.reverse $ V.fromList $ listOfShape shape
+    shapeMismatch, tooManyN1 :: forall a. a
+    shapeMismatch = throw (ReshapeMismatch new_shape old_shape)
+    tooManyN1 = throw (ReshapeTooManyMinusOne new_shape)
+
+    sizeEqual sh = V.product old_shape == V.product sh
+    replaceZ i v | v == 0 = case old_shape V.!? i of
+                              Just v' -> v'
+                              Nothing -> shapeMismatch
+                  | otherwise = v
+    new_shape_nz = V.imap replaceZ new_shape
+
+
+    minus_n1s = V.elemIndices (-1) new_shape_nz
+    filled_new_shape
+        | V.null minus_n1s = if sizeEqual new_shape_nz then new_shape_nz else shapeMismatch
+        | [s] <- V.toList minus_n1s = let (new_p1, new_p2) = V.splitAt s new_shape_nz
+                                      in matchN1 new_p1 (V.tail new_p2) old_shape
+        | otherwise = tooManyN1
+
+    matchN1 sh1a sh1b sh2 | r == 0 = sh1a V.++ V.fromList [q] V.++ sh1b
+                          | otherwise = shapeMismatch
+      where size1 = V.product $ sh1a V.++ sh1b
+            size2 = V.product sh2
+            (q, r) = size2 `divMod` size1
+
+argMax :: (UVM.Unbox e, Ord e)
+       => Array U DIM2 e -> V.Vector Int
+--argMax overlaps =
+--    let Z :. m :. n = Repa.extent overlaps
+--        findMax row = UV.maxIndex $ Repa.toUnboxed $ Repa.computeS $ Repa.slice overlaps (Z :. row :. All)
+--    in V.map findMax $ V.enumFromN (0 :: Int) m
+argMax arr = V.map (UV.maxIndex . Repa.toUnboxed) (vunstack arr)
 
 -- test_sample_rois = let
 --         v1 = Repa.fromListUnboxed (Z:.5::DIM1) [0, 0.8, 0.8, 2.2, 2.2]
