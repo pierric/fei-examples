@@ -171,8 +171,8 @@ fixedParams backbone stage symbol = do
                                         , layer n `elem` ["0", "2", "5", "7"]]
         (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        -- , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
-                                        , layer n `elem` ["1", "5"]]
+                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+                                        -- , layer n `elem` ["1", "5"]]
         (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
@@ -256,7 +256,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                         Repa.computeS res_no_bg
 
                         -- keep only those with confidence >= 0.7
-                        res_good = V.filter ((>= 0.7) . (#! 1)) $ res_out
+                        res_good = V.filter ((>= 0.7) . (^#! 1)) $ res_out
                     putDoc . pretty $ V.toList res_good
                     print $ length res_good
                     -- putStrLn $ prettyShow $ V.toList $ V.concatMap vunstack a
@@ -291,17 +291,17 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     nmsBoxes threshold boxes = runST $ do
         items <- V.thaw (vunstack boxes)
         go items
-        V.filter ((/= -1) . (#! 0)) <$> V.freeze items
+        V.filter ((/= -1) . (^#! 0)) <$> V.freeze items
       where
-        cmp a b | a #! 0 == -1 = GT
-                | b #! 0 == -1 = LT
-                | otherwise = compare (b #! 1) (a #! 1)
+        cmp a b | a ^#! 0 == -1 = GT
+                | b ^#! 0 == -1 = LT
+                | otherwise = compare (b ^#! 1) (a ^#! 1)
         go :: VM.MVector s (Array U DIM1 Float) -> ST s ()
         go items =
             when (VM.length items > 0) $ do
                 VA.sortBy cmp items
                 box0 <- VM.read items 0
-                when (box0 #! 0 == -1) $ do
+                when (box0 ^#! 0 == -1) $ do
                     items <- return $ VM.tail items
                     V.forM_ (V.enumFromN 0 (VM.length items)) $ \k -> do
                         boxK <- VM.read items k
