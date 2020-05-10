@@ -1,16 +1,16 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeApplications #-}
 module Main where
 
-import qualified Data.HashSet as S
+import RIO
+import RIO.List (unzip)
+import qualified RIO.NonEmpty as RNE
+import qualified RIO.Text as T
+import qualified RIO.HashSet as S
+import qualified RIO.HashMap as M
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Storable as SV
+import Formatting
 
 import MXNet.Base
-import qualified Data.HashMap.Strict as M
-import qualified Data.Vector.Storable as SV
-import Control.Monad.IO.Class
-import Control.Monad (forM_, void)
-import System.IO (hFlush, stdout)
-
 import qualified MXNet.Base.Operators.NDArray as A
 import MXNet.Base.Operators.Symbol (_Custom)
 import qualified MXNet.NN as NN
@@ -28,7 +28,7 @@ instance CustomOperationProp SoftmaxProp where
     prop_list_auxiliary_states _ = []
     prop_infer_shape _ [data_shape, _] =
         let output_shape = data_shape
-        in ([data_shape, [head data_shape]], [output_shape], [])
+        in ([data_shape, [RNE.head data_shape]], [output_shape], [])
     prop_declare_backward_dependency _ grad_out data_in data_out = data_in ++ data_out
 
     data Operation SoftmaxProp = Softmax
@@ -42,7 +42,7 @@ instance CustomOperation (Operation SoftmaxProp) where
         -- let batch_exp = L.toRows $ exp $ L.reshape num_classes vec :: [L.Vector Float]
         --     norm1 = map (realToFrac . L.sumElements) $ batch_exp :: [L.Vector Float]
         --     output = L.fromRows $ zipWith (/) batch_exp norm1
-        -- copyFromVector (NDArray out_data :: ArrayF) vec 
+        -- copyFromVector (NDArray out_data :: ArrayF) vec
 
         [result] <- A.softmax (#data := in_data .& #axis := 1 .& Nil)
         A._copyto_upd [out_data] (#data := result .& Nil)
@@ -60,9 +60,9 @@ instance CustomOperation (Operation SoftmaxProp) where
         --     result = L.fromRows $ zipWith upd rows (L.toList vec_lbl) :: L.Matrix Float
         -- copyFromVector (NDArray in_grad :: ArrayF) (L.flatten result)
 
-        out_shp@[_, num_classes] <- ndshape (NDArray out_data :: ArrayF)
-        [label_onehot] <- A.one_hot (#indices := label .& #depth := num_classes .& Nil)
-        [result] <- A.elemwise_sub (#lhs := out_data .& #rhs := label_onehot .& Nil)
+        out_shp@(_ :| [num_classes]) <- ndshape (NDArray out_data :: ArrayF)
+        label_onehot <- sing A.one_hot (#indices := label .& #depth := num_classes .& Nil)
+        result <- sing A.elemwise_sub (#lhs := out_data .& #rhs := label_onehot .& Nil)
         A._copyto_upd [in_grad] (#data := result .& Nil)
 
 
@@ -90,7 +90,7 @@ symbol = do
 
 default_initializer :: NN.Initializer Float
 default_initializer name shp
-    | NN.endsWith "-bias" name = NN.zeros name shp
+    | T.isSuffixOf "-bias" name = NN.zeros name shp
     | otherwise = NN.normal 0.1 name shp
 
 main :: IO ()
@@ -111,7 +111,7 @@ main = do
             }
     optimizer <- NN.makeOptimizer NN.SGD'Mom (NN.Const 0.0002) Nil
 
-    NN.train sess $ do
+    runSimpleApp $ NN.train sess $ do
 
         let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                    .& #label := "data/train-labels-idx1-ubyte"
@@ -121,38 +121,32 @@ main = do
                                    .& #batch_size := 16  .& Nil)
 
         total1 <- sizeD trainingData
-        liftIO $ putStrLn $ "[Train] "
-        forM_ (enumFromTo 1 20 :: [Int]) $ \ind -> do
-            liftIO $ putStrLn $ "iteration " ++ show ind
+        logInfo . display $ sformat "[Train] "
+        forM_ (V.enumFromTo 1 20) $ \ind -> do
+            logInfo . display $ sformat ("iteration " % int) ind
             metric <- NN.newMetric "train" (NN.CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 NN.fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- NN.format metric
-                liftIO $ do
-                   putStr $ "\r\ESC[K" ++ show i ++ "/" ++ show total1 ++ " " ++ eval
-                   hFlush stdout
-            liftIO $ putStrLn ""
+                logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % ":" % stext) i total1 eval
 
-        liftIO $ putStrLn $ "[Test] "
+        logInfo . display $ sformat "[Test] "
 
         total2 <- sizeD testingData
         result <- forEachD_i testingData $ \(i, (x, y)) -> do
-            liftIO $ do
-                putStr $ "\r\ESC[K" ++ show i ++ "/" ++ show total2
-                hFlush stdout
-            [y'] <- NN.forwardOnly (M.singleton "x" x)
+            logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int) i total2
+            ~[y'] <- NN.forwardOnly (M.singleton "x" x)
             ind1 <- liftIO $ toVector y
             ind2 <- liftIO $ argmax y' >>= toVector
             return (ind1, ind2)
-        liftIO $ putStr "\r\ESC[K"
 
         let (ls,ps) = unzip result
             ls_unbatched = mconcat ls
             ps_unbatched = mconcat ps
             total_test_items = SV.length ls_unbatched
             correct = SV.length $ SV.filter id $ SV.zipWith (==) ls_unbatched ps_unbatched
-        liftIO $ putStrLn $ "Accuracy: " ++ show correct ++ "/" ++ show total_test_items
+        logInfo . display $ sformat ("Accuracy: " % int % "/" % int) correct total_test_items
 
   where
     argmax :: ArrayF -> IO ArrayF
-    argmax (NDArray ys) = NDArray . head <$> A.argmax (#data := ys .& #axis := Just 1 .& Nil)
+    argmax (NDArray ys) = NDArray <$> sing A.argmax (#data := ys .& #axis := Just 1 .& Nil)

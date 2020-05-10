@@ -1,21 +1,13 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import qualified Data.HashMap.Strict as M
-import qualified Data.HashSet as S
-import Control.Monad (forM_, void, when)
-import Control.Monad.IO.Class
-import Control.Lens ((%~))
-import System.IO (hFlush, stdout)
+import RIO
+import RIO.List.Partial (last)
+import qualified RIO.HashMap as M
+import qualified RIO.HashSet as S
+import qualified RIO.Text as T
+import Control.Lens (use)
 import Options.Applicative
-import Data.Semigroup ((<>))
-import Control.Lens ((.=), (^.), use)
-import Text.Printf
-import qualified Data.Text as T
+import Formatting (sformat, formatToString, int, stext, left, float, (%))
 
 import MXNet.Base (
     NDArray(..),
@@ -24,14 +16,11 @@ import MXNet.Base (
     (.&), HMap(..), ArgOf(..),
     listArguments)
 import MXNet.NN
-import MXNet.NN.Utils
-import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Streaming
 import qualified MXNet.NN.ModelZoo.Resnet as Resnet
 import qualified MXNet.NN.ModelZoo.Resnext as Resnext
 
 type ArrayF = NDArray Float
-type DS = StreamData (Module "cifar10" Float IO) (ArrayF, ArrayF)
 
 data Model   = Resnet | Resnext deriving (Show, Read)
 data ProgArg = ProgArg Model (Maybe String)
@@ -44,11 +33,11 @@ cmdArgParser = ProgArg
 
 default_initializer :: Initializer Float
 default_initializer name shp
-    | endsWith ".bias"  name = zeros name shp
-    | endsWith ".beta"  name = zeros name shp
-    | endsWith ".gamma" name = ones  name shp
-    | endsWith ".running_mean" name = zeros name shp
-    | endsWith ".running_var"  name = ones  name shp
+    | T.isSuffixOf ".bias"  name = zeros name shp
+    | T.isSuffixOf ".beta"  name = zeros name shp
+    | T.isSuffixOf ".gamma" name = ones  name shp
+    | T.isSuffixOf ".running_mean" name = zeros name shp
+    | T.isSuffixOf ".running_var"  name = ones  name shp
     | otherwise = case shp of
                     [_,_] -> xavier 2.0 XavierGaussian XavierIn name shp
                     _ -> normal 0.1 name shp
@@ -87,39 +76,39 @@ main = do
     optimizer <- makeOptimizer SGD'Mom lr_scheduler Nil
     metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
 
-    train sess $ do
+    runSimpleApp $ train sess $ do
 
         let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
                                          .& #data_shape  := [3,32,32]
-                                         .& #batch_size  := 128 .& Nil) :: DS
+                                         .& #batch_size  := 128 .& Nil)
 
         case pretrained of
             Just path -> loadState path ["output.weight", "output.bias"]
             Nothing -> return ()
 
-        forM_ [1..100::Int] $ \ ei -> do
-            liftIO $ putStrLn $ "Epoch " ++ show ei
+        forM_ ([1..100] :: [Int]) $ \ ei -> do
+            logInfo . display $ sformat ("Epoch " % int) ei
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 let binding = M.fromList [("x", x), ("y", y)]
                 fitAndEval optimizer binding metric
                 eval <- format metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
-                liftIO $ do
-                    when (i `mod` 20 == 0) $ do
-                        putStrLn $ show i ++ " " ++ eval ++ " LR: " ++ show lr
-                    hFlush stdout
+                when (i `mod` 20 == 0) $ do
+                    logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
 
-            saveState (ei == 1) (printf "checkpoints/cifar10_resnet50_epoch_%03d" ei)
-            liftIO $ putStrLn ""
+            saveState (ei == 1)
+                (formatToString ("checkpoints/cifar10_resnet50_epoch_" % left 3 '0') ei)
 
 fixedParams symbol _ = do
     argnames <- listArguments symbol
     return $ S.fromList [n | n <- argnames
                         -- fix conv_0, stage_1_*, *_gamma, *_beta
-                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+                        , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
 
   where
-    layer param = case T.splitOn "." $ T.pack param of
+    layer param = case T.split (=='.') param of
                     "features":n:_ -> n
                     _ -> "<na>"
-    name  param = last $ T.splitOn "." $ T.pack param
+    name param = last $ T.split (=='.') param
+    elemL :: Eq a => a -> [a] -> Bool
+    elemL = elem

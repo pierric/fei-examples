@@ -1,5 +1,5 @@
 name:           fei-examples
-version:        0.3.0
+version:        0.4.0
 synopsis:       fei examples
 description:    Various fei examples
 homepage:       https://github.com/pierric/fei-examples#readme
@@ -26,14 +26,18 @@ Executable lenet
   ghc-options:          -Wall
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
-                      , unordered-containers >= 0.2.8
-                      , vector >= 0.12
+                      , rio
+                      , formatting
                       , fei-base
                       , fei-nn
                       , fei-modelzoo
   default-extensions:   OverloadedLabels
                       , TypeFamilies
-
+                      , DataKinds
+                      , OverloadedStrings
+                      , OverloadedLists
+                      , TypeApplications
+                      , NoImplicitPrelude
 
 Executable cifar10
   main-is:              cifar10.hs
@@ -41,29 +45,38 @@ Executable cifar10
   ghc-options:          -Wall
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
-                      , unordered-containers >= 0.2.8
-                      , vector >= 0.12
                       , optparse-applicative
-                      , lens >= 4.12
-                      , text
+                      , lens
+                      , rio
+                      , formatting
                       , fei-base
                       , fei-nn
                       , fei-modelzoo
   default-extensions:   OverloadedLabels
                       , TypeFamilies
+                      , DataKinds
+                      , OverloadedStrings
+                      , OverloadedLists
+                      , TypeApplications
+                      , NoImplicitPrelude
 
 Executable custom-op
   main-is:            custom-op.hs
   hs-source-dirs:     src
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
+                      , rio
+                      , formatting
                       , fei-base
                       , fei-nn
-                      , unordered-containers >= 0.2.8
-                      , vector >= 0.12
   default-extensions:   OverloadedLabels
+                      , OverloadedStrings
+                      , OverloadedLists
                       , TypeFamilies
                       , FlexibleInstances
+                      , DataKinds
+                      , TypeApplications
+                      , NoImplicitPrelude
 Executable rcnn
   main-is:             rcnn.hs
   other-modules:       DataIter.Coco
@@ -71,23 +84,19 @@ Executable rcnn
   ghc-options:          -Wall
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
-                      , unordered-containers >= 0.2.10
-                      , vector >= 0.12
                       , optparse-applicative
                       , attoparsec
-                      , text
-                      , lens >= 4.12
+                      , lens
                       , repa
                       , random-fu
-                      , directory
-                      , mtl
                       , conduit
                       , resourcet
-                      , deepseq
                       , store
-                      , bytestring
-                      , ansi-wl-pprint
+                      , wl-pprint-text
                       , vector-algorithms
+                      , vector
+                      , formatting
+                      , rio
                       , fei-base
                       , fei-nn
                       , fei-cocoapi
@@ -96,4 +105,9 @@ Executable rcnn
   default-extensions:   OverloadedLabels
                       , TypeFamilies
                       , FlexibleContexts
+                      , DataKinds
+                      , OverloadedStrings
+                      , OverloadedLists
+                      , TypeApplications
+                      , NoImplicitPrelude
 
