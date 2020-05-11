@@ -45,6 +45,7 @@ import MXNet.Base (
     ndshape,
     listArguments, listOutputs, internals, inferShape, at', at,
     toRepa,
+    FShape(..),
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN hiding (reshape)
@@ -121,10 +122,14 @@ buildProposalTargetProp params = do
     }
 
   where
-    floatList = sepBy rational $ char ','
+    floatList = char '[' *> sepBy rational (char ',') <* char ']'
 
+parseLit :: HasCallStack => P.Parser a -> Text -> Either String a
 parseLit  c t = (parseOnly (c <* endOfInput) t)
+
+parseLitR :: HasCallStack => P.Parser a -> Text -> a
 parseLitR c t = parseLit c t ^?! _Right
+
 toTriple [a, b, c] = (a, b, c)
 toTriple x = error (show x)
 
@@ -220,8 +225,8 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
     sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
-                                 ("im_info",     [3])],
+        _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
+                                 ("im_info", (STensor [3]))],
         _cfg_label = [],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
@@ -338,7 +343,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     -- get the feature (width, height) at the top of feature extraction.
-    (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3, ds_img_size, ds_img_size])]
+    (_, [(_, STensor [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", (STensor [1, 3, ds_img_size, ds_img_size]))]
 
     coco_inst <- Coco.coco ds_base_path "train2017"
 
@@ -362,9 +367,9 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                         Coco.cocoImages True .|  C.mapM Coco.loadImageAndBBoxes .| C.catMaybes .| anchors
 
     sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
-                                 ("im_info",     [3]),
-                                 ("gt_boxes",    [0, 5])],
+        _cfg_data  = M.fromList [("data",        (STensor [3, ds_img_size, ds_img_size])),
+                                 ("im_info",     (STensor [3])),
+                                 ("gt_boxes",    (STensor [0, 5]))],
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,

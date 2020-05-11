@@ -13,6 +13,7 @@ import MXNet.Base (
     NDArray(..),
     contextCPU, contextGPU0,
     mxListAllOpNames,
+    FShape(..),
     (.&), HMap(..), ArgOf(..),
     listArguments)
 import MXNet.NN
@@ -59,7 +60,7 @@ main = do
         Just _  -> fixedParams net model
 
     sess <- initialize @"cifar10" net $ Config {
-                _cfg_data = M.singleton "x" [3,32,32],
+                _cfg_data = M.singleton "x" (STensor [3,32,32]),
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
