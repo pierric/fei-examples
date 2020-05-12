@@ -18,6 +18,7 @@ import MXNet.Base (
     listArguments)
 import MXNet.NN
 import MXNet.NN.DataIter.Streaming
+import qualified MXNet.NN.Initializer as I
 import qualified MXNet.NN.ModelZoo.Resnet as Resnet
 import qualified MXNet.NN.ModelZoo.Resnext as Resnext
 
@@ -34,14 +35,14 @@ cmdArgParser = ProgArg
 
 default_initializer :: Initializer Float
 default_initializer name shp
-    | T.isSuffixOf ".bias"  name = zeros name shp
-    | T.isSuffixOf ".beta"  name = zeros name shp
-    | T.isSuffixOf ".gamma" name = ones  name shp
-    | T.isSuffixOf ".running_mean" name = zeros name shp
-    | T.isSuffixOf ".running_var"  name = ones  name shp
+    | T.isSuffixOf ".bias"  name = I.zeros name shp
+    | T.isSuffixOf ".beta"  name = I.zeros name shp
+    | T.isSuffixOf ".gamma" name = I.ones  name shp
+    | T.isSuffixOf ".running_mean" name = I.zeros name shp
+    | T.isSuffixOf ".running_var"  name = I.ones  name shp
     | otherwise = case shp of
-                    [_,_] -> xavier 2.0 XavierGaussian XavierIn name shp
-                    _ -> normal 0.1 name shp
+                    [_,_] -> I.xavier 2.0 I.XavierGaussian I.XavierIn name shp
+                    _ -> I.normal 0.1 name shp
 
 main :: IO ()
 main = do
@@ -92,7 +93,7 @@ main = do
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 let binding = M.fromList [("x", x), ("y", y)]
                 fitAndEval optimizer binding metric
-                eval <- format metric
+                eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
                 when (i `mod` 20 == 0) $ do
                     logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr

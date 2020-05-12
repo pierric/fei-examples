@@ -1,6 +1,6 @@
 module Main where
 
-import RIO
+import RIO hiding (Const)
 import RIO.List (unzip)
 import qualified RIO.NonEmpty as RNE
 import qualified RIO.Text as T
@@ -13,8 +13,8 @@ import Formatting
 import MXNet.Base
 import qualified MXNet.Base.Operators.NDArray as A
 import MXNet.Base.Operators.Symbol (_Custom)
-import qualified MXNet.NN as NN
-import qualified MXNet.NN.Utils as NN
+import MXNet.NN
+import qualified MXNet.NN.Initializer as I
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Streaming
 
@@ -53,30 +53,30 @@ instance CustomOperation (Operation SoftmaxProp) where
 
 symbol :: DType a => IO (Symbol a)
 symbol = do
-    x  <- NN.variable "x"
-    y  <- NN.variable "y"
+    x  <- variable "x"
+    y  <- variable "y"
 
-    v1 <- NN.convolution "conv1"   (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
-    a1 <- NN.activation "conv1-a"  (#data := v1 .& #act_type := #tanh .& Nil)
-    p1 <- NN.pooling "conv1-p"     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+    v1 <- convolution "conv1"   (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
+    a1 <- activation "conv1-a"  (#data := v1 .& #act_type := #tanh .& Nil)
+    p1 <- pooling "conv1-p"     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    v2 <- NN.convolution "conv2"   (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
-    a2 <- NN.activation "conv2-a"  (#data := v2 .& #act_type := #tanh .& Nil)
-    p2 <- NN.pooling "conv2-p"     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+    v2 <- convolution "conv2"   (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
+    a2 <- activation "conv2-a"  (#data := v2 .& #act_type := #tanh .& Nil)
+    p2 <- pooling "conv2-p"     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    fl <- NN.flatten "flatten"     (#data := p2 .& Nil)
+    fl <- flatten "flatten"     (#data := p2 .& Nil)
 
-    v3 <- NN.fullyConnected "fc1"  (#data := fl .& #num_hidden := 500 .& Nil)
-    a3 <- NN.activation "fc1-a"    (#data := v3 .& #act_type := #tanh .& Nil)
+    v3 <- fullyConnected "fc1"  (#data := fl .& #num_hidden := 500 .& Nil)
+    a3 <- activation "fc1-a"    (#data := v3 .& #act_type := #tanh .& Nil)
 
-    v4 <- NN.fullyConnected "fc2"  (#data := a3 .& #num_hidden := 10  .& Nil)
+    v4 <- fullyConnected "fc2"  (#data := a3 .& #num_hidden := 10  .& Nil)
     a4 <- _Custom "softmax" (#data := [v4, y] .& #op_type := "softmax_custom" .& Nil)
     return $ Symbol a4
 
-default_initializer :: NN.Initializer Float
+default_initializer :: Initializer Float
 default_initializer name shp
-    | T.isSuffixOf "-bias" name = NN.zeros name shp
-    | otherwise = NN.normal 0.1 name shp
+    | T.isSuffixOf "-bias" name = I.zeros name shp
+    | otherwise = I.normal 0.1 name shp
 
 main :: IO ()
 main = do
@@ -86,17 +86,17 @@ main = do
     registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- symbol
 
-    sess <- NN.initialize @"lenet" net $ NN.Config {
-                NN._cfg_data = M.singleton "x" (STensor [1,28,28]),
-                NN._cfg_label = ["y"],
-                NN._cfg_initializers = M.empty,
-                NN._cfg_default_initializer = default_initializer,
-                NN._cfg_fixed_params = S.fromList [],
-                NN._cfg_context = contextGPU0
+    sess <- initialize @"lenet" net $ Config {
+                _cfg_data = M.singleton "x" (STensor [1,28,28]),
+                _cfg_label = ["y"],
+                _cfg_initializers = M.empty,
+                _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = S.fromList [],
+                _cfg_context = contextGPU0
             }
-    optimizer <- NN.makeOptimizer NN.SGD'Mom (NN.Const 0.0002) Nil
+    optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
-    runSimpleApp $ NN.train sess $ do
+    runSimpleApp $ train sess $ do
 
         let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                    .& #label := "data/train-labels-idx1-ubyte"
@@ -109,10 +109,10 @@ main = do
         logInfo . display $ sformat "[Train] "
         forM_ (V.enumFromTo 1 20) $ \ind -> do
             logInfo . display $ sformat ("iteration " % int) ind
-            metric <- NN.newMetric "train" (NN.CrossEntropy "y" NN.:* NN.Accuracy "y" NN.:* NN.MNil)
+            metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
-                NN.fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
-                eval <- NN.format metric
+                fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
+                eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % ":" % stext) i total1 eval
 
         logInfo . display $ sformat "[Test] "
@@ -120,7 +120,7 @@ main = do
         total2 <- sizeD testingData
         result <- forEachD_i testingData $ \(i, (x, y)) -> do
             logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int) i total2
-            ~[y'] <- NN.forwardOnly (M.singleton "x" x)
+            ~[y'] <- forwardOnly (M.singleton "x" x)
             ind1 <- liftIO $ toVector y
             ind2 <- liftIO $ argmax y' >>= toVector
             return (ind1, ind2)

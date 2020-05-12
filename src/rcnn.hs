@@ -48,12 +48,10 @@ import MXNet.Base (
     FShape(..),
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
-import MXNet.NN hiding (reshape)
-import MXNet.NN.DataIter.Class
+import MXNet.NN
 import MXNet.NN.DataIter.Conduit
-import MXNet.NN.Utils (loadState, saveState)
-import MXNet.NN.Utils.Repa
-import MXNet.NN.NDArray (reshape)
+import qualified MXNet.NN.NDArray as A
+import qualified MXNet.NN.Initializer as I
 import MXNet.NN.ModelZoo.RCNN.FasterRCNN
 import MXNet.NN.ModelZoo.RCNN.ProposalTarget
 import MXNet.NN.ModelZoo.Utils.Box
@@ -136,19 +134,19 @@ toTriple x = error (show x)
 
 default_initializer :: Initializer Float
 default_initializer name = case name of
-    "rpn_conv_3x3.weight"  -> normal 0.01 name
-    "rpn_conv_3x3.bias"    -> zeros name
-    "rpn_cls_score.weight" -> normal 0.01 name
-    "rpn_cls_score.bias"   -> zeros name
-    "rpn_bbox_pred.weight" -> normal 0.01 name
-    "rpn_bbox_pred.bias"   -> zeros name
-    "cls_score.weight"     -> normal 0.01 name
-    "cls_score.bias"       -> zeros name
-    "bbox_pred.weight"     -> normal 0.001 name
-    "bbox_pred.bias"       -> zeros name
-    _ | T.isSuffixOf ".running_mean" name -> zeros name
-      | T.isSuffixOf ".running_var"  name -> zeros name
-      | otherwise -> empty name
+    "rpn_conv_3x3.weight"  -> I.normal 0.01 name
+    "rpn_conv_3x3.bias"    -> I.zeros name
+    "rpn_cls_score.weight" -> I.normal 0.01 name
+    "rpn_cls_score.bias"   -> I.zeros name
+    "rpn_bbox_pred.weight" -> I.normal 0.01 name
+    "rpn_bbox_pred.bias"   -> I.zeros name
+    "cls_score.weight"     -> I.normal 0.01 name
+    "cls_score.bias"       -> I.zeros name
+    "bbox_pred.weight"     -> I.normal 0.001 name
+    "bbox_pred.bias"       -> I.zeros name
+    _ | T.isSuffixOf ".running_mean" name -> I.zeros name
+      | T.isSuffixOf ".running_var"  name -> I.zeros name
+      | otherwise -> I.empty name
 
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
@@ -245,8 +243,8 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         img_info   <- liftIO $ Coco.repaToNDArray img_info_r
 
         -- TODO: use expand_dims instead
-        img_tensor <- liftIO $ ndshape img_tensor >>= reshape img_tensor . (1 <|)
-        img_info   <- liftIO $ ndshape img_info   >>= reshape img_info   . (1 <|)
+        img_tensor <- liftIO $ ndshape img_tensor >>= A.reshape img_tensor . (1 <|)
+        img_info   <- liftIO $ ndshape img_info   >>= A.reshape img_info   . (1 <|)
 
         checkpoint <- lastSavedState "checkpoints"
         case checkpoint of
@@ -418,7 +416,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                              , ("bbox_target", y1)
                                              , ("bbox_weight", y2) ]
                     fitAndEval optimizer binding metric
-                    eval <- format metric
+                    eval <- formatMetric metric
                     lr <- use (untag . mod_statistics . stat_last_lr)
                     logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
 

@@ -1,6 +1,6 @@
 module Main where
 
-import RIO hiding (Const, evaluate)
+import RIO hiding (Const)
 import RIO.List (unzip)
 import qualified RIO.HashMap as M
 import qualified RIO.HashSet as S
@@ -8,10 +8,11 @@ import qualified RIO.Vector.Boxed as V
 import qualified RIO.Vector.Storable as SV
 import Formatting (sformat, (%), stext, int)
 
-import MXNet.Base hiding (zeros)
+import MXNet.Base
 import qualified MXNet.Base.Operators.NDArray as A
 import MXNet.NN
 import MXNet.NN.DataIter.Conduit
+import qualified MXNet.NN.Initializer as I
 import qualified MXNet.NN.ModelZoo.Lenet as Model
 
 type ArrayF = NDArray Float
@@ -22,9 +23,9 @@ range = V.enumFromTo 1
 default_initializer :: Initializer Float
 default_initializer name shp =
     case length shp of
-        1 -> zeros name shp
-        2 -> xavier 2.0 XavierGaussian XavierIn name shp
-        _ -> normal 0.1 name shp
+        1 -> I.zeros name shp
+        2 -> I.xavier 2.0 I.XavierGaussian I.XavierIn name shp
+        _ -> I.normal 0.1 name shp
 
 main :: IO ()
 main = do
@@ -33,7 +34,7 @@ main = do
     _    <- mxListAllOpNames
     net  <- Model.symbol
     sess <- initialize @"lenet" net $ Config {
-                _cfg_data = M.singleton "x" [1,28,28],
+                _cfg_data = M.singleton "x" (STensor [1,28,28]),
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -59,14 +60,14 @@ main = do
             metric <- newMetric "train" (CrossEntropy "y")
             void $ forEachD_i trainingData $ \(i, (x, y)) -> do
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
-                eval <- format metric
+                eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % " " % stext) i total1 eval
 
             metric <- newMetric "val" (Accuracy "y")
             result <- forEachD_i testingData $ \(i, (x, y)) -> do
                 pred <- forwardOnly (M.singleton "x" x)
-                evaluate metric (M.singleton "y" y) pred
-                eval <- format metric
+                evalMetric metric (M.singleton "y" y) pred
+                eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % " " % stext) i total2 eval
                 let [y'] = pred
                 ind1 <- liftIO $ toVector y

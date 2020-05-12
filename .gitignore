@@ -24,3 +24,5 @@ cabal.project.local~
 data/*
 !data/*.sh
 cache
+checkpoints*
+params
