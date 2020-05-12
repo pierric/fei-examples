@@ -1,40 +1,41 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import qualified Data.HashMap.Strict as M
-import qualified Data.HashSet as S
-import Control.Exception.Base (throw)
-import Control.Monad (forM_, void, unless, when)
-import Control.Applicative (liftA2)
-import qualified Data.Vector.Storable as SV
-import Control.Monad.IO.Class
+import RIO hiding (Const)
+import qualified RIO.HashMap as M
+import qualified RIO.HashSet as S
+import qualified RIO.Vector.Storable as SV
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Boxed.Partial as V (head)
+import qualified RIO.Vector.Unboxed as VU
+import qualified RIO.Vector.Unboxed.Partial as VU ((//))
+import qualified Data.Vector.Mutable as VM
+import qualified Data.Vector.Algorithms.Intro as VA
+import qualified RIO.Text as T
+import RIO.List (sort)
+import RIO.List.Partial (last)
+import RIO.NonEmpty ((<|))
+import RIO.Char (isDigit)
+import RIO.FilePath
+import RIO.Directory (doesFileExist, canonicalizePath)
+--import Control.Applicative (liftA2)
 import Control.Monad.Trans.Resource
-import Control.Monad.Reader
-import Control.Lens ((.=), (^.), use)
-import Control.Monad.ST (runST, ST)
-import System.IO (hFlush, stdout)
+import Control.Lens ((.=), (^?!), ix, use, _Right, _1, _2, makePrisms)
+--import Control.Monad.ST (runST, ST)
 import Options.Applicative (
     Parser, execParser,
     long, value, option, auto, strOption, metavar, showDefault, eitherReader, help,
     info, helper, fullDesc, header, (<**>), switch)
-import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
-import qualified Data.Text as T
 import Data.Conduit
 import qualified Data.Conduit.List as C
-import System.Directory (doesFileExist, canonicalizePath)
-import Text.Printf (printf)
-import qualified Data.Vector as V
-import qualified Data.Vector.Unboxed as VU
-import qualified Data.Vector.Mutable as VM
-import qualified Data.Vector.Algorithms.Intro as VA
-import Data.List (sort)
 import qualified Data.Array.Repa as Repa
-import Data.Array.Repa (DIM1, DIM2, DIM3, Z(..), (:.)(..))
+import Data.Array.Repa (Array, U, DIM1, DIM2, DIM3, Z(..), (:.)(..))
+import Formatting (sformat, formatToString, int, stext, string, left, float, (%))
+import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
+import qualified Data.Attoparsec.Text as P
+import qualified Text.PrettyPrint.Leijen.Text as PP
 
 import MXNet.Base (
     NDArray(..), Symbol, toVector, execForward,
@@ -44,23 +45,20 @@ import MXNet.Base (
     ndshape,
     listArguments, listOutputs, internals, inferShape, at', at,
     toRepa,
+    FShape(..),
     HMap(..), (.&), ArgOf(..))
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN hiding (reshape)
 import MXNet.NN.DataIter.Class
 import MXNet.NN.DataIter.Conduit
 import MXNet.NN.Utils (loadState, saveState)
+import MXNet.NN.Utils.Repa
 import MXNet.NN.NDArray (reshape)
 import MXNet.NN.ModelZoo.RCNN.FasterRCNN
 import MXNet.NN.ModelZoo.RCNN.ProposalTarget
-import MXNet.NN.ModelZoo.Utils.Repa
 import MXNet.NN.ModelZoo.Utils.Box
 import qualified DataIter.Coco as Coco
 import qualified MXNet.NN.DataIter.Coco as Coco
-
-import Debug.Trace
-import Data.Array.Repa (Array, U, Shape)
-import Text.PrettyPrint.ANSI.Leijen (putDoc, Pretty(..))
 
 data ProgConfig = ProgConfig {
     ds_base_path       :: String,
@@ -108,20 +106,29 @@ cmdArgParser = liftA2 (,)
                     <*> switch           (long "inference" <> showDefault <> help "do inference")
                     <*> option auto      (long "inference-img-id" <> value 0 <> help "image id"))
   where
-    list obj  = parseOnly (sepBy obj (char ',') <* endOfInput) . T.pack
+    list obj  = parseLit (sepBy obj (char ',')) . T.pack
     floatList = eitherReader $ list rational
     intList   = eitherReader $ list decimal
 
 buildProposalTargetProp params = do
     let params' = M.fromList params
     return $ ProposalTargetProp {
-        _pt_num_classes = read $ params' M.! "num_classes",
-        _pt_batch_images= read $ params' M.! "batch_images",
-        _pt_batch_rois  = read $ params' M.! "batch_rois",
-        _pt_fg_fraction = read $ params' M.! "fg_fraction",
-        _pt_fg_overlap  = read $ params' M.! "fg_overlap",
-        _pt_box_stds    = read $ params' M.! "box_stds"
+        _pt_num_classes = parseLitR decimal $ params' ^?! ix "num_classes",
+        _pt_batch_images= parseLitR decimal $ params' ^?! ix "batch_images",
+        _pt_batch_rois  = parseLitR decimal $ params' ^?! ix "batch_rois",
+        _pt_fg_fraction = parseLitR rational $ params' ^?! ix "fg_fraction",
+        _pt_fg_overlap  = parseLitR rational $ params' ^?! ix "fg_overlap",
+        _pt_box_stds    = parseLitR floatList $ params' ^?! ix "box_stds"
     }
+
+  where
+    floatList = char '[' *> sepBy rational (char ',') <* char ']'
+
+parseLit :: HasCallStack => P.Parser a -> Text -> Either String a
+parseLit  c t = (parseOnly (c <* endOfInput) t)
+
+parseLitR :: HasCallStack => P.Parser a -> Text -> a
+parseLitR c t = parseLit c t ^?! _Right
 
 toTriple [a, b, c] = (a, b, c)
 toTriple x = error (show x)
@@ -139,15 +146,15 @@ default_initializer name = case name of
     "cls_score.bias"       -> zeros name
     "bbox_pred.weight"     -> normal 0.001 name
     "bbox_pred.bias"       -> zeros name
-    _ | endsWith ".running_mean" name -> zeros name
-      | endsWith ".running_var"  name -> zeros name
+    _ | T.isSuffixOf ".running_mean" name -> zeros name
+      | T.isSuffixOf ".running_var"  name -> zeros name
       | otherwise -> empty name
 
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
     if not e
-        then liftIO $ putStrLn $ "'" ++ weights_path ++ ".params' doesn't exist."
+        then logInfo . display $ sformat ("'" % string % ".params' doesn't exist.") weights_path
         else loadState weights_path ["rpn_conv_3x3.weight",
                                      "rpn_conv_3x3.bias",
                                      "rpn_cls_score.weight",
@@ -161,27 +168,44 @@ loadWeights weights_path = do
 
 data Stage = TRAIN | INFERENCE
 
-fixedParams :: Backbone -> Stage -> Symbol Float -> IO (S.HashSet String)
+fixedParams :: Backbone -> Stage -> Symbol Float -> IO (HashSet Text)
 fixedParams backbone stage symbol = do
     argnames <- listArguments symbol
     return $ case (stage, backbone) of
         (INFERENCE, _)    -> S.fromList argnames
         (TRAIN, VGG16)    -> S.fromList [n | n <- argnames
                                         -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
-                                        , layer n `elem` ["0", "2", "5", "7"]]
+                                        , layer n `elemL` ["0", "2", "5", "7"]]
         (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
-                                        -- , layer n `elem` ["1", "5"]]
+                                        , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
+                                        -- , layer n `elemL` ["1", "5"]]
         (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        , layer n `elem` ["1", "5"] || name n `elem` ["gamma", "beta"]]
+                                        , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
 
   where
-    layer param = case T.splitOn "." $ T.pack param of
+    layer param = case T.split (=='.') param of
                     "features":n:_ -> n
                     _ -> "<na>"
-    name  param = last $ T.splitOn "." $ T.pack param
+    name  param = last $ T.split (=='.') param
+    elemL :: Eq a => a -> [a] -> Bool
+    elemL = elem
+
+data App c = App LogFunc c
+makePrisms ''App
+
+instance HasLogFunc (App c) where
+    logFuncL = _App . _1
+
+instance Coco.HasDatasetConfig (App Coco.CocoConfig) where
+    type DatasetTag (App Coco.CocoConfig) = "coco"
+    datasetConfig = _App . _2
+
+runApp conf body = do
+    logopt <- logOptionsHandle stdout True
+    runResourceT $ withLogFunc logopt $ \logfunc ->
+        flip runReaderT (App logfunc conf) body
 
 main :: IO ()
 main = do
@@ -201,8 +225,8 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
     sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
-                                 ("im_info",     [3])],
+        _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
+                                 ("im_info", (STensor [3]))],
         _cfg_label = [],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
@@ -212,21 +236,22 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     let vimg = V.filter (\img -> img ^. img_id == pg_infer_image_id) $ coco_inst_ ^. images
         img = V.head vimg
 
-    when (V.null vimg) (throw $ userError $ "image_id " ++ show pg_infer_image_id ++ " not found in val2017")
+    when (V.null vimg) (throwString $ "image_id " ++ show pg_infer_image_id ++ " not found in val2017")
 
-    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTuple ds_img_pixel_means) (toTuple ds_img_pixel_stds)
-    runResourceT $ flip runReaderT coco_conf $ train sess $ do
+    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
+    runApp coco_conf $ train sess $ do
         Just (img_ident, img_tensor_r, img_info_r) <- Coco.loadImage img
         img_tensor <- liftIO $ Coco.repaToNDArray img_tensor_r
         img_info   <- liftIO $ Coco.repaToNDArray img_info_r
 
-        img_tensor <- liftIO $ ndshape img_tensor >>= reshape img_tensor . (1:)
-        img_info   <- liftIO $ ndshape img_info   >>= reshape img_info   . (1:)
+        -- TODO: use expand_dims instead
+        img_tensor <- liftIO $ ndshape img_tensor >>= reshape img_tensor . (1 <|)
+        img_info   <- liftIO $ ndshape img_info   >>= reshape img_info   . (1 <|)
 
         checkpoint <- lastSavedState "checkpoints"
         case checkpoint of
             Nothing -> do
-                throw $ userError "Checkpoint not found."
+                throwString $ "Checkpoint not found."
             Just filename -> do
                 loadState filename []
                 let binding = M.fromList [ ("data",    img_tensor)
@@ -257,11 +282,11 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
                         -- keep only those with confidence >= 0.7
                         res_good = V.filter ((>= 0.7) . (^#! 1)) $ res_out
-                    putDoc . pretty $ V.toList res_good
-                    print $ length res_good
-                    -- putStrLn $ prettyShow $ V.toList $ V.concatMap vunstack a
-                    -- putDoc . pretty $ V.toList $ vunstack cls_prob
-                    print $ "Done: " ++ img_ident
+                    PP.putDoc . PP.pretty $ V.toList $ V.map PrettyArray res_good
+                -- logInfo . display $ length res_good
+                -- putStrLn $ prettyShow $ V.toList $ V.concatMap vunstack a
+                -- putDoc . pretty $ V.toList $ vunstack cls_prob
+                logInfo . display $ sformat ("Done: " % string) img_ident
 
   where
     decodeBoxes rois deltas box_stds im_info =
@@ -318,13 +343,13 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     rpn_cls_score_output <- internals sym >>= flip at' "rpn_cls_score_output"
     -- get the feature (width, height) at the top of feature extraction.
-    (_, [(_, [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", [1, 3, ds_img_size, ds_img_size])]
+    (_, [(_, STensor [_, _, feat_width, feat_height])], _, _) <- inferShape rpn_cls_score_output [("data", (STensor [1, 3, ds_img_size, ds_img_size]))]
 
     coco_inst <- Coco.coco ds_base_path "train2017"
 
     let fixed_num_gt = if rcnn_batch_size == 1 then Nothing else Just 50
 
-    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTuple ds_img_pixel_means) (toTuple ds_img_pixel_stds)
+    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
         anchors = Coco.withAnchors (#batch_size     := (rcnn_batch_size :: Int)
                                  .& #feature_width  := feat_width
                                  .& #feature_height := feat_height
@@ -342,9 +367,9 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                         Coco.cocoImages True .|  C.mapM Coco.loadImageAndBBoxes .| C.catMaybes .| anchors
 
     sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        [3, ds_img_size, ds_img_size]),
-                                 ("im_info",     [3]),
-                                 ("gt_boxes",    [0, 5])],
+        _cfg_data  = M.fromList [("data",        (STensor [3, ds_img_size, ds_img_size])),
+                                 ("im_info",     (STensor [3])),
+                                 ("gt_boxes",    (STensor [0, 5]))],
         _cfg_label = ["label", "bbox_target", "bbox_weight"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
@@ -361,43 +386,42 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     --                                                                .& #clip_gradient := 5
     --                                                                .& Nil)
 
-    runResourceT $ flip runReaderT coco_conf $ train sess $ do
-        -- sess_callbacks .= [Callback DumpLearningRate, Callback (Checkpoint "checkpoints")]
-        checkpoint <- lastSavedState "checkpoints"
-        start_epoch <- case checkpoint of
-            Nothing -> do
-                liftIO $ print pretrained_weights
-                unless (null pretrained_weights) (loadWeights pretrained_weights)
-                return (1 :: Int)
-            Just filename -> do
-                loadState filename []
-                return $ read (take 3 $ drop 30 filename) + 1
-        liftIO $ putStrLn ("fixed parameters: " ++ show (sort $ S.toList fixed_params))
+    runApp coco_conf $ train sess $ do
+            checkpoint <- lastSavedState "checkpoints"
+            start_epoch <- case checkpoint of
+                Nothing -> do
+                    logInfo . display $ sformat string pretrained_weights
+                    unless (null pretrained_weights) (loadWeights pretrained_weights)
+                    return (1 :: Int)
+                Just filename -> do
+                    loadState filename []
+                    let (base, _) = splitExtension filename
+                        fn_rev = T.reverse $ T.pack base
+                        epoch = parseLitR (P.takeWhile isDigit <* P.takeText) fn_rev
+                        epoch_next = parseLitR decimal $ T.reverse epoch
+                    return epoch_next
+            logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-        metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
+            metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
 
-        -- update the internal counting of the iterations
-        -- the lr is updated as per to it
-        untag . mod_statistics . stat_num_upd .= (start_epoch - 1) * pg_train_iter_per_epoch
+            -- update the internal counting of the iterations
+            -- the lr is updated as per to it
+            untag . mod_statistics . stat_num_upd .= (start_epoch - 1) * pg_train_iter_per_epoch
 
-        forM_ [start_epoch..pg_train_epochs] $ \ ei -> do
-            liftIO $ putStrLn $ "Epoch " ++ show ei
-            liftIO $ hFlush stdout
-            void $ forEachD_i (liftD $ takeD pg_train_iter_per_epoch data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
-                let binding = M.fromList [ ("data",        x0)
-                                         , ("im_info",     x1)
-                                         , ("gt_boxes",    x2)
-                                         , ("label",       y0)
-                                         , ("bbox_target", y1)
-                                         , ("bbox_weight", y2) ]
-                fitAndEval optimizer binding metric
-                eval <- format metric
-                lr <- use (untag . mod_statistics . stat_last_lr)
-                liftIO $ do
-                    putStrLn $ show i ++ " " ++ eval ++ " LR: " ++ show lr
-                    hFlush stdout
+            forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
+                logInfo . display $ sformat ("Epoch " % int) ei
+                void $ forEachD_i (liftD $ takeD pg_train_iter_per_epoch data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
+                    let binding = M.fromList [ ("data",        x0)
+                                             , ("im_info",     x1)
+                                             , ("gt_boxes",    x2)
+                                             , ("label",       y0)
+                                             , ("bbox_target", y1)
+                                             , ("bbox_weight", y2) ]
+                    fitAndEval optimizer binding metric
+                    eval <- format metric
+                    lr <- use (untag . mod_statistics . stat_last_lr)
+                    logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
 
-            saveState (ei == 1) (printf "checkpoints/faster_rcnn_epoch_%03d" ei)
-            liftIO $ putStrLn ""
+                saveState (ei == 1)
+                    (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
 
-toTuple [a, b, c] = (a, b, c)

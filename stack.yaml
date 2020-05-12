@@ -1,4 +1,4 @@
-resolver: lts-12.16
+resolver: lts-14.27
 
 #setup-info:
 #  ghc:
@@ -22,20 +22,12 @@ extra-deps:
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git
   commit: f75a5dbe2ec9fbc67df0936333e0665b033f9e22
-- c2hs-extra-0.1.0.1
 - JuicyPixels-repa-0.7.1.0
-- streaming-utils-0.1.4.7
-- graphviz-2999.20.0.3
-- unordered-containers-0.2.10.0
-- conduit-concurrent-map-0.1.1
 - hip-1.5.4.0
-- Chart-1.9
-- Chart-diagrams-1.9
-- SVGFonts-1.6.0.3
 extra-include-dirs:
-- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/include
+- /home/jiasen/workspace/mxnet/build-1.6.0/include
 extra-lib-dirs:
-- /home/jiasen/hdd/dschungel/incubator-mxnet-1.5/lib
+- /home/jiasen/workspace/mxnet/build-1.6.0
 flags:
   fei-base:
-    MXNet_1_5: true
+    MXNet_1_6: true

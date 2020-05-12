@@ -1,33 +1,20 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module DataIter.Coco where
 
-import Data.Maybe (catMaybes, fromMaybe)
-import Data.List (unzip6)
-import Control.Exception
-import Data.Array.Repa (Array, DIM1, DIM3, D, U, (:.)(..), Z (..), Any(..),
-    fromListUnboxed, extent, backpermute, extend, (-^), (+^), (*^), (/^))
+import RIO
+import qualified RIO.NonEmpty as RNE
+import qualified RIO.Vector.Boxed as V
+import qualified RIO.Vector.Storable as SV
+import Data.Array.Repa (Array, DIM1, DIM3, U, (:.)(..), Z (..), fromListUnboxed)
 import qualified Data.Array.Repa as Repa
-import Data.Array.Repa.Repr.Unboxed (Unbox)
-import qualified Data.Vector as V
-import qualified Data.Vector.Storable as SV
-import Control.Lens ((^.), view, makeLenses)
 import Data.Conduit
-import qualified Data.Conduit.Combinators as C (yieldMany)
 import qualified Data.Conduit.List as C
-import Control.Monad.Reader
-import Data.Maybe (fromJust)
-import qualified Data.Random as RND (shuffleN, runRVar, StdRandom(..))
-import Control.Monad.Trans.Resource
-import Control.DeepSeq
 
-import MXNet.Base (NDArray(..), Fullfilled, ArgsHMap, ParameterList, Attr(..), (!), (!?), (.&), HMap(..), ArgOf(..), fromVector)
-import MXNet.Base.Operators.NDArray (stack)
-import MXNet.NN.DataIter.Conduit
+import MXNet.Base (NDArray(..), Fullfilled, ArgsHMap, ParameterList, Attr(..), (!), (!?), fromVector)
+import MXNet.NN.Utils.Repa
 import MXNet.NN.DataIter.Coco
 import qualified MXNet.NN.DataIter.Anchor as Anchor
-import MXNet.Coco.Types
 
 type instance ParameterList "WithAnchors" =
     '[ '("batch_size",     'AttrReq Int),
@@ -79,8 +66,8 @@ assignAnchors :: MonadIO m =>
     (String, ImageTensor, ImageInfo, GTBoxes) ->
     m (ImageTensor, ImageInfo, GTBoxes, Repa.Array U DIM1 Float, Repa.Array U DIM3 Float, Repa.Array U DIM3 Float)
 assignAnchors conf anchors featureWidth featureHeight maxGT (ident, img, info, gt) = do
-    let imHeight = floor $ info Anchor.#! 0
-        imWidth  = floor $ info Anchor.#! 1
+    let imHeight = floor $ info ^#! 0
+        imWidth  = floor $ info ^#! 1
     (lbls, targets, weights) <- runReaderT (Anchor.assign gt imWidth imHeight anchors) conf
 
     -- reshape and transpose labls   from (feat_h * feat_w * #anch,  ) to (#anch,     feat_h, feat_w)
@@ -117,24 +104,19 @@ toNDArray :: MonadIO m =>
     [((ImageTensor, ImageInfo, GTBoxes, Array U DIM1 Float, Array U DIM3 Float, Array U DIM3 Float))] ->
     m ((NDArray Float, NDArray Float, NDArray Float), (NDArray Float, NDArray Float, NDArray Float))
 toNDArray dat = liftIO $ do
-    imagesC  <- convertToMX images
-    infosC   <- convertToMX infos
-    gtboxesC <- mapM (convertToMX . V.toList) gtboxes >>= stackList
-    labelsC  <- convertToMX labels
-    targetsC <- convertToMX targets
-    weightsC <- convertToMX weights
+    imagesC  <- repaToNDArray $ evstack images
+    infosC   <- repaToNDArray $ evstack infos
+    gtboxesC <- repaToNDArray $ evstack $ V.map evstack gtboxes
+    labelsC  <- repaToNDArray $ evstack labels
+    targetsC <- repaToNDArray $ evstack targets
+    weightsC <- repaToNDArray $ evstack weights
     return $!! ((imagesC, infosC, gtboxesC), (labelsC, targetsC, weightsC))
   where
-    (images, infos, gtboxes, labels, targets, weights) = unzip6 dat
-
-    stackList arrs = do
-        let hdls = map unNDArray arrs
-        NDArray . head <$> stack (#data := hdls .& #num_args := length hdls .& Nil)
-
-    convertToMX arr = mapM repaToNDArray arr >>= stackList
+    (images, infos, gtboxes, labels, targets, weights) = V.unzip6 $ V.fromList dat
+    evstack arrs = vstack $ V.map (expandDim 0) arrs
 
 repaToNDArray :: Repa.Shape sh => Array U sh Float -> IO (NDArray Float)
 repaToNDArray arr = do
-    let sh = reverse $ Repa.listOfShape $ Repa.extent arr
+    let Just sh = RNE.nonEmpty $ reverse $ Repa.listOfShape $ Repa.extent arr
     fromVector sh $ SV.convert $ Repa.toUnboxed arr
 
