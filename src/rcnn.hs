@@ -248,7 +248,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         img_tensor <- liftIO $ ndshape img_tensor >>= A.reshape img_tensor . (1 <|)
         img_info   <- liftIO $ ndshape img_info   >>= A.reshape img_info   . (1 <|)
 
-        checkpoint <- lastSavedState "checkpoints"
+        checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
         case checkpoint of
             Nothing -> do
                 throwString $ "Checkpoint not found."
@@ -384,7 +384,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                                    .& Nil)
 
     runApp coco_conf $ do
-        checkpoint <- lastSavedState "checkpoints"
+        checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
         start_epoch <- case checkpoint of
             Nothing -> do
                 logInfo . display $ sformat string pretrained_weights
