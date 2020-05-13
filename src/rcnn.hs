@@ -32,7 +32,7 @@ import Data.Conduit
 import qualified Data.Conduit.List as C
 import qualified Data.Array.Repa as Repa
 import Data.Array.Repa (Array, U, DIM1, DIM2, DIM3, Z(..), (:.)(..))
-import Formatting (sformat, formatToString, int, stext, string, left, float, (%))
+import Formatting (sformat, formatToString, int, stext, string, left, fixed, (%))
 import Data.Attoparsec.Text (sepBy, char, rational, decimal, endOfInput, parseOnly)
 import qualified Data.Attoparsec.Text as P
 import qualified Text.PrettyPrint.Leijen.Text as PP
@@ -50,7 +50,7 @@ import MXNet.Base (
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN
 import MXNet.NN.DataIter.Conduit
--- import MXNet.NN.DataIter.ConduitAsync
+import MXNet.NN.DataIter.ConduitAsync
 import qualified MXNet.NN.NDArray as A
 import qualified MXNet.NN.Initializer as I
 import MXNet.NN.ModelZoo.RCNN.FasterRCNN
@@ -203,7 +203,7 @@ instance Coco.HasDatasetConfig (App Coco.CocoConfig) where
 
 runApp :: c -> ReaderT (App c) (ResourceT IO) a -> IO a
 runApp conf body = do
-    logopt <- logOptionsHandle stdout True
+    logopt <- logOptionsHandle stdout False
     runResourceT $ withLogFunc logopt $ \logfunc ->
         flip runReaderT (App logfunc conf) body
 
@@ -224,7 +224,7 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
-    sess <- newMVar =<< initialize @"fastrcnn" sym (Config {
+    sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
                 _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
                 ("im_info", (STensor [3]))],
                 _cfg_label = [],
@@ -363,14 +363,13 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                  .& #bg_overlap     := rpn_bg_overlap
                                  .& #fixed_num_gt   := fixed_num_gt
                                  .& Nil)
-        data_iter = -- ConduitAsyncData $
-                    ConduitData (Just rcnn_batch_size) $
+        data_iter = asyncConduit (Just rcnn_batch_size) $
                         Coco.cocoImages True .|  C.mapM Coco.loadImageAndBBoxes .| C.catMaybes .| anchors
 
-    sess <- newMVar =<< initialize @"fastrcnn" sym (Config {
-                _cfg_data  = M.fromList [("data",        (STensor [3, ds_img_size, ds_img_size])),
-                ("im_info",     (STensor [3])),
-                ("gt_boxes",    (STensor [0, 5]))],
+    sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
+                _cfg_data  = M.fromList [("data",     (STensor [3, ds_img_size, ds_img_size])),
+                                         ("im_info",  (STensor [3])),
+                                         ("gt_boxes", (STensor [0, 5]))],
                 _cfg_label = ["label", "bbox_target", "bbox_weight"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -421,7 +420,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 fitAndEval optimizer binding metric
                 eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
-                logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
+                logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
