@@ -33,17 +33,17 @@ main = do
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
     net  <- Model.symbol
-    sess <- initialize @"lenet" net $ Config {
-                _cfg_data = M.singleton "x" (STensor [1,28,28]),
-                _cfg_label = ["y"],
-                _cfg_initializers = M.empty,
-                _cfg_default_initializer = default_initializer,
-                _cfg_fixed_params = S.fromList [],
-                _cfg_context = contextGPU0
-            }
+    sess <- newMVar =<< initialize @"lenet" net (Config {
+            _cfg_data = M.singleton "x" (STensor [1,28,28]),
+            _cfg_label = ["y"],
+            _cfg_initializers = M.empty,
+            _cfg_default_initializer = default_initializer,
+            _cfg_fixed_params = S.fromList [],
+            _cfg_context = contextGPU0
+            })
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
-    runSimpleApp $ train sess $ do
+    runSimpleApp $ do
         let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                    .& #label := "data/train-labels-idx1-ubyte"
                                    .& #batch_size := 128 .& Nil)
@@ -58,15 +58,15 @@ main = do
         forM_ (range 1) $ \ind -> do
             logInfo .display $ sformat ("iteration " % int) ind
             metric <- newMetric "train" (CrossEntropy "y")
-            void $ forEachD_i trainingData $ \(i, (x, y)) -> do
+            void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % " " % stext) i total1 eval
 
             metric <- newMetric "val" (Accuracy "y")
-            result <- forEachD_i testingData $ \(i, (x, y)) -> do
+            result <- forEachD_i testingData $ \(i, (x, y)) -> withSession sess $ do
                 pred <- forwardOnly (M.singleton "x" x)
-                evalMetric metric (M.singleton "y" y) pred
+                void $ evalMetric metric (M.singleton "y" y) pred
                 eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % " " % stext) i total2 eval
                 let [y'] = pred

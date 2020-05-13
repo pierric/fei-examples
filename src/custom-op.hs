@@ -86,17 +86,17 @@ main = do
     registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- symbol
 
-    sess <- initialize @"lenet" net $ Config {
+    sess <- newMVar =<< initialize @"lenet" net (Config {
                 _cfg_data = M.singleton "x" (STensor [1,28,28]),
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_fixed_params = S.fromList [],
                 _cfg_context = contextGPU0
-            }
+            })
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
-    runSimpleApp $ train sess $ do
+    runSimpleApp $ do
 
         let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                    .& #label := "data/train-labels-idx1-ubyte"
@@ -110,7 +110,7 @@ main = do
         forM_ (V.enumFromTo 1 20) $ \ind -> do
             logInfo . display $ sformat ("iteration " % int) ind
             metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
-            void $ forEachD_i trainingData $ \(i, (x, y)) -> do
+            void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- formatMetric metric
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % ":" % stext) i total1 eval
@@ -118,7 +118,7 @@ main = do
         logInfo . display $ sformat "[Test] "
 
         total2 <- sizeD testingData
-        result <- forEachD_i testingData $ \(i, (x, y)) -> do
+        result <- forEachD_i testingData $ \(i, (x, y)) -> withSession sess $ do
             logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int) i total2
             ~[y'] <- forwardOnly (M.singleton "x" x)
             ind1 <- liftIO $ toVector y

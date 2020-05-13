@@ -50,6 +50,7 @@ import MXNet.Base (
 import MXNet.Coco.Types (img_id, images)
 import MXNet.NN
 import MXNet.NN.DataIter.Conduit
+-- import MXNet.NN.DataIter.ConduitAsync
 import qualified MXNet.NN.NDArray as A
 import qualified MXNet.NN.Initializer as I
 import MXNet.NN.ModelZoo.RCNN.FasterRCNN
@@ -152,7 +153,7 @@ loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
     if not e
-        then logInfo . display $ sformat ("'" % string % ".params' doesn't exist.") weights_path
+        then lift . logInfo . display $ sformat ("'" % string % ".params' doesn't exist.") weights_path
         else loadState weights_path ["rpn_conv_3x3.weight",
                                      "rpn_conv_3x3.bias",
                                      "rpn_cls_score.weight",
@@ -200,6 +201,7 @@ instance Coco.HasDatasetConfig (App Coco.CocoConfig) where
     type DatasetTag (App Coco.CocoConfig) = "coco"
     datasetConfig = _App . _2
 
+runApp :: c -> ReaderT (App c) (ResourceT IO) a -> IO a
 runApp conf body = do
     logopt <- logOptionsHandle stdout True
     runResourceT $ withLogFunc logopt $ \logfunc ->
@@ -222,22 +224,22 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
 
     coco_inst@(Coco.Coco _ _ coco_inst_) <- Coco.coco ds_base_path "val2017"
-    sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
-                                 ("im_info", (STensor [3]))],
-        _cfg_label = [],
-        _cfg_initializers = M.empty,
-        _cfg_default_initializer = default_initializer,
-        _cfg_fixed_params = fixed_params,
-        _cfg_context = contextGPU0
-    }
+    sess <- newMVar =<< initialize @"fastrcnn" sym (Config {
+                _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
+                ("im_info", (STensor [3]))],
+                _cfg_label = [],
+                _cfg_initializers = M.empty,
+                _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = fixed_params,
+                _cfg_context = contextGPU0
+            })
     let vimg = V.filter (\img -> img ^. img_id == pg_infer_image_id) $ coco_inst_ ^. images
         img = V.head vimg
 
     when (V.null vimg) (throwString $ "image_id " ++ show pg_infer_image_id ++ " not found in val2017")
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
-    runApp coco_conf $ train sess $ do
+    runApp coco_conf $ withSession sess $ do
         Just (img_ident, img_tensor_r, img_info_r) <- Coco.loadImage img
         img_tensor <- liftIO $ Coco.repaToNDArray img_tensor_r
         img_info   <- liftIO $ Coco.repaToNDArray img_info_r
@@ -361,65 +363,66 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                  .& #bg_overlap     := rpn_bg_overlap
                                  .& #fixed_num_gt   := fixed_num_gt
                                  .& Nil)
-        data_iter = ConduitData (Just rcnn_batch_size) $
+        data_iter = -- ConduitAsyncData $
+                    ConduitData (Just rcnn_batch_size) $
                         Coco.cocoImages True .|  C.mapM Coco.loadImageAndBBoxes .| C.catMaybes .| anchors
 
-    sess <- initialize @"fastrcnn" sym $ Config {
-        _cfg_data  = M.fromList [("data",        (STensor [3, ds_img_size, ds_img_size])),
-                                 ("im_info",     (STensor [3])),
-                                 ("gt_boxes",    (STensor [0, 5]))],
-        _cfg_label = ["label", "bbox_target", "bbox_weight"],
-        _cfg_initializers = M.empty,
-        _cfg_default_initializer = default_initializer,
-        _cfg_fixed_params = fixed_params,
-        _cfg_context = contextGPU0
-    }
+    sess <- newMVar =<< initialize @"fastrcnn" sym (Config {
+                _cfg_data  = M.fromList [("data",        (STensor [3, ds_img_size, ds_img_size])),
+                ("im_info",     (STensor [3])),
+                ("gt_boxes",    (STensor [0, 5]))],
+                _cfg_label = ["label", "bbox_target", "bbox_weight"],
+                _cfg_initializers = M.empty,
+                _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = fixed_params,
+                _cfg_context = contextGPU0
+            })
 
     optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
                                                    .& #wd := 0.0005
                                                    .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
                                                    .& #clip_gradient := 5
                                                    .& Nil)
-    -- optimizer <- makeOptimizer ADAM (Factor 0.0001 0.5 5000 0.000001) (#rescale_grad := 1 / (fromIntegral rcnn_batch_size)
-    --                                                                .& #clip_gradient := 5
-    --                                                                .& Nil)
 
-    runApp coco_conf $ train sess $ do
-            checkpoint <- lastSavedState "checkpoints"
-            start_epoch <- case checkpoint of
-                Nothing -> do
-                    logInfo . display $ sformat string pretrained_weights
-                    unless (null pretrained_weights) (loadWeights pretrained_weights)
-                    return (1 :: Int)
-                Just filename -> do
-                    loadState filename []
-                    let (base, _) = splitExtension filename
-                        fn_rev = T.reverse $ T.pack base
-                        epoch = parseLitR (P.takeWhile isDigit <* P.takeText) fn_rev
-                        epoch_next = parseLitR decimal $ T.reverse epoch
-                    return epoch_next
-            logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
+    runApp coco_conf $ do
+        checkpoint <- lastSavedState "checkpoints"
+        start_epoch <- case checkpoint of
+            Nothing -> do
+                logInfo . display $ sformat string pretrained_weights
+                unless (null pretrained_weights)
+                    (withSession sess $ loadWeights pretrained_weights)
+                return (1 :: Int)
+            Just filename -> do
+                withSession sess $ loadState filename []
+                let (base, _) = splitExtension filename
+                    fn_rev = T.reverse $ T.pack base
+                    epoch = parseLitR (P.takeWhile isDigit <* P.takeText) fn_rev
+                    epoch_next = parseLitR decimal $ T.reverse epoch
+                return epoch_next
+        logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-            metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
+        metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
 
-            -- update the internal counting of the iterations
-            -- the lr is updated as per to it
+        -- update the internal counting of the iterations
+        -- the lr is updated as per to it
+        withSession sess $
             untag . mod_statistics . stat_num_upd .= (start_epoch - 1) * pg_train_iter_per_epoch
 
-            forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
-                logInfo . display $ sformat ("Epoch " % int) ei
-                void $ forEachD_i (liftD $ takeD pg_train_iter_per_epoch data_iter) $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> do
-                    let binding = M.fromList [ ("data",        x0)
-                                             , ("im_info",     x1)
-                                             , ("gt_boxes",    x2)
-                                             , ("label",       y0)
-                                             , ("bbox_target", y1)
-                                             , ("bbox_weight", y2) ]
-                    fitAndEval optimizer binding metric
-                    eval <- formatMetric metric
-                    lr <- use (untag . mod_statistics . stat_last_lr)
-                    logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
+        forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
+            logInfo . display $ sformat ("Epoch " % int) ei
+            let slice = takeD pg_train_iter_per_epoch data_iter
+            void $ forEachD_i slice $ \(i, ((x0, x1, x2), (y0, y1, y2))) -> withSession sess $ do
+                let binding = M.fromList [ ("data",        x0)
+                                         , ("im_info",     x1)
+                                         , ("gt_boxes",    x2)
+                                         , ("label",       y0)
+                                         , ("bbox_target", y1)
+                                         , ("bbox_weight", y2) ]
+                fitAndEval optimizer binding metric
+                eval <- formatMetric metric
+                lr <- use (untag . mod_statistics . stat_last_lr)
+                logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
 
-                saveState (ei == 1)
-                    (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
+            withSession sess $ saveState (ei == 1)
+                (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
 
