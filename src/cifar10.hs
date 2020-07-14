@@ -1,30 +1,31 @@
 module Main where
 
-import RIO
-import RIO.List.Partial (last)
-import qualified RIO.HashMap as M
-import qualified RIO.HashSet as S
-import qualified RIO.Text as T
-import Control.Lens (use)
-import Options.Applicative
-import Formatting (sformat, formatToString, int, stext, left, float, (%))
+import           Control.Lens                (use)
+import           Formatting                  (float, formatToString, int, left,
+                                              sformat, stext, (%))
+import           Options.Applicative
+import           RIO
+import qualified RIO.HashMap                 as M
+import qualified RIO.HashSet                 as S
+import           RIO.List.Partial            (last)
+import qualified RIO.Text                    as T
 
-import MXNet.Base (
-    NDArray(..),
-    contextCPU, contextGPU0,
-    mxListAllOpNames,
-    FShape(..),
-    (.&), HMap(..), ArgOf(..),
-    listArguments)
-import MXNet.NN
-import MXNet.NN.DataIter.Streaming
-import qualified MXNet.NN.Initializer as I
-import qualified MXNet.NN.ModelZoo.Resnet as Resnet
-import qualified MXNet.NN.ModelZoo.Resnext as Resnext
+import           MXNet.Base                  (ArgOf (..), FShape (..),
+                                              HMap (..), NDArray (..),
+                                              contextCPU, contextGPU0,
+                                              listArguments, mxListAllOpNames,
+                                              (.&))
+import           MXNet.NN
+import           MXNet.NN.DataIter.Streaming
+import qualified MXNet.NN.Initializer        as I
+import qualified MXNet.NN.ModelZoo.Resnet    as Resnet
+import qualified MXNet.NN.ModelZoo.Resnext   as Resnext
 
 type ArrayF = NDArray Float
 
-data Model   = Resnet | Resnext deriving (Show, Read)
+data Model = Resnet
+    | Resnext
+    deriving (Show, Read)
 data ProgArg = ProgArg Model (Maybe String)
 cmdArgParser :: Parser ProgArg
 cmdArgParser = ProgArg
@@ -52,9 +53,13 @@ main = do
     -- call mxListAllOpNames can ensure the MXNet itself is properly initialized
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
-    net  <- case model of
-              Resnet  -> Resnet.symbol 10 50 32
-              Resnext -> Resnext.symbol
+    net  <- runLayerBuilder $ do
+                dat <- variable "x"
+                lbl <- variable "y"
+                logits <- case model of
+                    Resnet  -> Resnet.resnet50 10 dat
+                    Resnext -> Resnext.symbol dat
+                named "softmax" $ softmaxoutput  (#data := logits .& #label := lbl .& Nil)
 
     fixed <- case pretrained of
         Nothing -> return S.empty
@@ -86,7 +91,7 @@ main = do
 
         withSession sess $ case pretrained of
             Just path -> loadState path ["output.weight", "output.bias"]
-            Nothing -> return ()
+            Nothing   -> return ()
 
         forM_ ([1..100] :: [Int]) $ \ ei -> do
             logInfo . display $ sformat ("Epoch " % int) ei
@@ -110,7 +115,7 @@ fixedParams symbol _ = do
   where
     layer param = case T.split (=='.') param of
                     "features":n:_ -> n
-                    _ -> "<na>"
+                    _              -> "<na>"
     name param = last $ T.split (=='.') param
     elemL :: Eq a => a -> [a] -> Bool
     elemL = elem

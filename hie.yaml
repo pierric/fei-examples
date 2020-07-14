@@ -1,0 +1,10 @@
+cradle:
+  stack:
+    - path: "./src/lenet.hs"
+      component: "fei-examples:exe:lenet"
+    - path: "./src/custom-op.hs"
+      component: "fei-examples:exe:custom-op"
+    - path: "./src/cifar10.hs"
+      component: "fei-examples:exe:cifar10"
+    - path: "./src/faster-rcnn.hs"
+      component: "fei-examples:exe:faster-rcnn"

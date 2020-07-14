@@ -1,19 +1,19 @@
 module Main where
 
-import RIO hiding (Const)
-import RIO.List (unzip)
-import qualified RIO.HashMap as M
-import qualified RIO.HashSet as S
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Storable as SV
-import Formatting (sformat, (%), stext, int)
+import           Formatting                   (int, sformat, stext, (%))
+import           RIO                          hiding (Const)
+import qualified RIO.HashMap                  as M
+import qualified RIO.HashSet                  as S
+import           RIO.List                     (unzip)
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Storable          as SV
 
-import MXNet.Base
+import           MXNet.Base
 import qualified MXNet.Base.Operators.NDArray as A
-import MXNet.NN
-import MXNet.NN.DataIter.Conduit
-import qualified MXNet.NN.Initializer as I
-import qualified MXNet.NN.ModelZoo.Lenet as Model
+import           MXNet.NN
+import           MXNet.NN.DataIter.Conduit
+import qualified MXNet.NN.Initializer         as I
+import qualified MXNet.NN.ModelZoo.Lenet      as Model
 
 type ArrayF = NDArray Float
 
@@ -32,7 +32,7 @@ main = do
     -- call mxListAllOpNames can ensure the MXNet itself is properly initialized
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
-    net  <- Model.symbol
+    net  <- runLayerBuilder Model.symbol
     sess <- newMVar =<< initialize @"lenet" net (Config {
             _cfg_data = M.singleton "x" (STensor [1,28,28]),
             _cfg_label = ["y"],

@@ -1,20 +1,23 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
 module DataIter.Coco where
 
-import RIO
-import qualified RIO.NonEmpty as RNE
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Storable as SV
-import Data.Array.Repa (Array, DIM1, DIM3, U, (:.)(..), Z (..), fromListUnboxed)
-import qualified Data.Array.Repa as Repa
-import Data.Conduit
-import qualified Data.Conduit.List as C
+import           Data.Array.Repa          ((:.) (..), Array, DIM1, DIM3, U,
+                                           Z (..), fromListUnboxed)
+import qualified Data.Array.Repa          as Repa
+import           Data.Conduit
+import qualified Data.Conduit.List        as C
+import           RIO
+import qualified RIO.NonEmpty             as RNE
+import qualified RIO.Vector.Boxed         as V
+import qualified RIO.Vector.Storable      as SV
 
-import MXNet.Base (NDArray(..), Fullfilled, ArgsHMap, ParameterList, Attr(..), (!), (!?), fromVector)
-import MXNet.NN.Utils.Repa
-import MXNet.NN.DataIter.Coco
+import           MXNet.Base               (ArgsHMap, Attr (..), Fullfilled,
+                                           NDArray (..), ParameterList,
+                                           fromVector, (!), (!?))
 import qualified MXNet.NN.DataIter.Anchor as Anchor
+import           MXNet.NN.DataIter.Coco
+import           MXNet.NN.Utils.Repa
 
 type instance ParameterList "WithAnchors" =
     '[ '("batch_size",     'AttrReq Int),
@@ -38,7 +41,6 @@ withAnchors :: (MonadIO m, Fullfilled "WithAnchors" args) =>
              ((NDArray Float, NDArray Float, NDArray Float), (NDArray Float, NDArray Float, NDArray Float))
              m ()
 withAnchors args = do
-    anchors <- runReaderT (Anchor.anchors featureStride featW featH) anchConf
     C.mapM (assignAnchors anchConf anchors featW featH maxGT)
         .| C.chunksOf batchSize
         .| C.mapM toNDArray
@@ -49,9 +51,12 @@ withAnchors args = do
     featH = args ! #feature_height
     featureStride = fromMaybe 16 $ args !? #feature_stride
     maxGT = fromMaybe Nothing $ args !? #fixed_num_gt
+    scales = fromMaybe [8, 16, 32] $ args !? #anchor_scales
+    ratios = fromMaybe [0.5, 1, 2] $ args !? #anchor_ratios
+    anchors = Anchor.anchors (featH, featW) featureStride 32 scales ratios
     anchConf = Anchor.Configuration {
-        Anchor._conf_anchor_scales  = fromMaybe [8, 16, 32] $ args !? #anchor_scales,
-        Anchor._conf_anchor_ratios  = fromMaybe [0.5, 1, 2] $ args !? #anchor_ratios,
+        Anchor._conf_anchor_scales  = scales,
+        Anchor._conf_anchor_ratios  = ratios,
         Anchor._conf_allowed_border = fromMaybe 0 $ args !? #allowed_border,
         Anchor._conf_fg_num         = floor $ (fromMaybe 0.5 $ args !? #fg_fraction) * fromIntegral batchRois,
         Anchor._conf_batch_num      = batchRois,

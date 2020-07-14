@@ -77,8 +77,8 @@ Executable custom-op
                       , DataKinds
                       , TypeApplications
                       , NoImplicitPrelude
-Executable rcnn
-  main-is:             rcnn.hs
+Executable faster-rcnn
+  main-is:             faster-rcnn.hs
   other-modules:       DataIter.Coco
   hs-source-dirs:      src
   ghc-options:          -Wall

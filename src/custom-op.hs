@@ -1,22 +1,22 @@
 module Main where
 
-import RIO hiding (Const)
-import RIO.List (unzip)
-import qualified RIO.NonEmpty as RNE
-import qualified RIO.Text as T
-import qualified RIO.HashSet as S
-import qualified RIO.HashMap as M
-import qualified RIO.Vector.Boxed as V
-import qualified RIO.Vector.Storable as SV
-import Formatting
+import           Formatting
+import           RIO                          hiding (Const)
+import qualified RIO.HashMap                  as M
+import qualified RIO.HashSet                  as S
+import           RIO.List                     (unzip)
+import qualified RIO.NonEmpty                 as RNE
+import qualified RIO.Text                     as T
+import qualified RIO.Vector.Boxed             as V
+import qualified RIO.Vector.Storable          as SV
 
-import MXNet.Base
+import           MXNet.Base
 import qualified MXNet.Base.Operators.NDArray as A
-import MXNet.Base.Operators.Symbol (_Custom)
-import MXNet.NN
-import qualified MXNet.NN.Initializer as I
-import MXNet.NN.DataIter.Class
-import MXNet.NN.DataIter.Streaming
+import           MXNet.Base.Operators.Symbol  (_Custom)
+import           MXNet.NN
+import           MXNet.NN.DataIter.Class
+import           MXNet.NN.DataIter.Streaming
+import qualified MXNet.NN.Initializer         as I
 
 type ArrayF = NDArray Float
 
@@ -51,27 +51,27 @@ instance CustomOperation (Operation SoftmaxProp) where
         A._copyto_upd [in_grad] (#data := result .& Nil)
 
 
-symbol :: DType a => IO (Symbol a)
+symbol :: Layer SymbolHandle
 symbol = do
     x  <- variable "x"
     y  <- variable "y"
 
-    v1 <- convolution "conv1"   (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
-    a1 <- activation "conv1-a"  (#data := v1 .& #act_type := #tanh .& Nil)
-    p1 <- pooling "conv1-p"     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+    sequential "custom-op" $ do
+        v1 <- convolution (#data := x  .& #kernel := [5,5] .& #num_filter := 20 .& Nil)
+        a1 <- activation  (#data := v1 .& #act_type := #tanh .& Nil)
+        p1 <- pooling     (#data := a1 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    v2 <- convolution "conv2"   (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
-    a2 <- activation "conv2-a"  (#data := v2 .& #act_type := #tanh .& Nil)
-    p2 <- pooling "conv2-p"     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
+        v2 <- convolution (#data := p1 .& #kernel := [5,5] .& #num_filter := 50 .& Nil)
+        a2 <- activation  (#data := v2 .& #act_type := #tanh .& Nil)
+        p2 <- pooling     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-    fl <- flatten "flatten"     (#data := p2 .& Nil)
+        fl <- flatten     (#data := p2 .& Nil)
 
-    v3 <- fullyConnected "fc1"  (#data := fl .& #num_hidden := 500 .& Nil)
-    a3 <- activation "fc1-a"    (#data := v3 .& #act_type := #tanh .& Nil)
+        v3 <- fullyConnected (#data := fl .& #num_hidden := 500 .& Nil)
+        a3 <- activation     (#data := v3 .& #act_type := #tanh .& Nil)
 
-    v4 <- fullyConnected "fc2"  (#data := a3 .& #num_hidden := 10  .& Nil)
-    a4 <- _Custom "softmax" (#data := [v4, y] .& #op_type := "softmax_custom" .& Nil)
-    return $ Symbol a4
+        v4 <- fullyConnected (#data := a3 .& #num_hidden := 10  .& Nil)
+        named "softmax" $ prim _Custom (#data := [v4, y] .& #op_type := "softmax_custom" .& Nil)
 
 default_initializer :: Initializer Float
 default_initializer name shp
@@ -84,7 +84,7 @@ main = do
     -- i.e. MXNet operators are registered in the NNVM
     _    <- mxListAllOpNames
     registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
-    net  <- symbol
+    net  <- runLayerBuilder symbol
 
     sess <- newMVar =<< initialize @"lenet" net (Config {
                 _cfg_data = M.singleton "x" (STensor [1,28,28]),
