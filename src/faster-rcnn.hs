@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedLists   #-}
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE TemplateHaskell   #-}
 module Main where
@@ -29,9 +30,11 @@ import           RIO.Directory                     (canonicalizePath,
 import           RIO.FilePath
 import qualified RIO.HashMap                       as M
 import qualified RIO.HashSet                       as S
-import           RIO.List                          (sort)
-import           RIO.List.Partial                  (last)
+import           RIO.List                          (sort, unzip3, unzip6)
+import           RIO.List.Partial                  (last, maximum)
 import           RIO.NonEmpty                      (nonEmpty)
+import qualified RIO.NonEmpty                      as RNE
+import qualified RIO.NonEmpty.Partial              as RNE
 import qualified RIO.Text                          as T
 import qualified RIO.Vector.Boxed                  as V
 import qualified RIO.Vector.Boxed.Partial          as V (head)
@@ -41,17 +44,19 @@ import qualified RIO.Vector.Unboxed.Partial        as VU ((//))
 import qualified Text.PrettyPrint.Leijen.Text      as PP
 
 import qualified DataIter.Coco                     as Coco
-import           MXNet.Base                        (ArgOf (..), FShape (..),
-                                                    HMap (..), NDArray,
-                                                    SymbolHandle, contextCPU,
-                                                    contextGPU0, fromVector,
+import           MXNet.Base                        (ArgOf (..), DType,
+                                                    FShape (..), HMap (..),
+                                                    NDArray (..), SymbolHandle,
+                                                    contextCPU, contextGPU0,
+                                                    fromRepa, fromVector, full,
                                                     getInternalByName,
                                                     inferOutputShape,
-                                                    listArguments,
+                                                    inferShape, listArguments,
                                                     mxListAllOpNames,
-                                                    mxNotifyShutdown,
+                                                    mxNotifyShutdown, ndshape,
                                                     registerCustomOperator,
-                                                    toRepa, (.&))
+                                                    sing, toRepa, (.&))
+import qualified MXNet.Base.Operators.NDArray      as A
 import qualified MXNet.Base.ParserUtils            as P
 import           MXNet.Coco.Types                  (images, img_id)
 import           MXNet.NN
@@ -80,6 +85,7 @@ cmdArgParser = liftA2 (,)
                 (RcnnConfiguration
                     <$> option intList   (long "rpn-anchor-scales" <> metavar "SCALES"         <> showDefault <> value [8,16,32] <> help "rpn anchor scales")
                     <*> option floatList (long "rpn-anchor-ratios" <> metavar "RATIOS"         <> showDefault <> value [0.5,1,2] <> help "rpn anchor ratios")
+                    <*> option auto      (long "rpn-anchor-bsize"  <> metavar "BSIZE"          <> showDefault <> value 16 <> help "rpn anchor base size")
                     -- <*> option auto      (long "rpn-feat-stride"   <> metavar "STRIDE"         <> showDefault <> value 16        <> help "rpn feature stride")
                     <*> option auto      (long "rpn-batch-rois"    <> metavar "BATCH-ROIS"     <> showDefault <> value 256       <> help "rpn number of rois per batch")
                     <*> option auto      (long "rpn-pre-nms-topk"  <> metavar "PRE-NMS-TOPK"   <> showDefault <> value 12000     <> help "rpn nms pre-top-k")
@@ -91,14 +97,14 @@ cmdArgParser = liftA2 (,)
                     <*> option auto      (long "rpn-bg-overlap"    <> metavar "BG-OVERLAP"     <> showDefault <> value 0.3       <> help "rpn background iou threshold")
                     <*> option auto      (long "rpn-allowed-border"<> metavar "ALLOWED-BORDER" <> showDefault <> value 0         <> help "rpn allowed border")
                     <*> option auto      (long "rcnn-num-classes"  <> metavar "NUM-CLASSES"    <> showDefault <> value 81        <> help "rcnn number of classes")
-                    <*> option auto      (long "rcnn-feat-stride"  <> metavar "FEATURE-STRIDE" <> showDefault <> value [16]        <> help "rcnn feature stride")
                     <*> option intList   (long "rcnn-pooled-size"  <> metavar "POOLED-SIZE"    <> showDefault <> value [7,7]     <> help "rcnn pooled size")
                     <*> option auto      (long "rcnn-batch-rois"   <> metavar "BATCH_ROIS"     <> showDefault <> value 128       <> help "rcnn batch rois")
-                    <*> option auto      (long "rcnn-batch-size"   <> metavar "BATCH-SIZE"     <> showDefault <> value 1         <> help "rcnn batch size")
                     <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"    <> showDefault <> value 0.25      <> help "rcnn foreground fraction")
                     <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"     <> showDefault <> value 0.5       <> help "rcnn foreground iou threshold")
                     <*> option auto      (long "rcnn-max-num-gt"   <> metavar "NUM-GT"     <> showDefault <> value 100       <> help "rcnn max number of gt")
                     -- <*> option floatList (long "rcnn-bbox-stds"    <> metavar "BBOX-STDDEV"    <> showDefault <> value [0.1, 0.1, 0.2, 0.2] <> help "standard deviation of bbox")
+                    <*> option intList   (long "strides"           <> metavar "STRIDE" <> showDefault <> value [16]      <> help "feature stride")
+                    <*> option auto      (long "batch-size"        <> metavar "BATCH-SIZE"     <> showDefault <> value 1         <> help "batch size")
                     <*> strOption        (long "pretrained"        <> metavar "PATH"           <> value "" <> help "path to pretrained model")
                     <*> option auto      (long "backbone"          <> metavar "BACKBONE"       <> value VGG16 <> help "vgg-16 or resnet-50"))
                 (ProgConfig
@@ -114,26 +120,7 @@ cmdArgParser = liftA2 (,)
     floatList = eitherReader $ P.parseOnly (P.list P.rational<* P.endOfInput) . T.pack
     intList   = eitherReader $ P.parseOnly (P.list P.decimal <* P.endOfInput) . T.pack
 
--- buildProposalTargetProp params = do
---     let params' = M.fromList params
---     return $ ProposalTargetProp {
---         _pt_num_classes = parseLitR decimal $ params' ^?! ix "num_classes",
---         _pt_batch_images= parseLitR decimal $ params' ^?! ix "batch_images",
---         _pt_batch_rois  = parseLitR decimal $ params' ^?! ix "batch_rois",
---         _pt_fg_fraction = parseLitR rational $ params' ^?! ix "fg_fraction",
---         _pt_fg_overlap  = parseLitR rational $ params' ^?! ix "fg_overlap",
---         _pt_box_stds    = parseLitR floatList $ params' ^?! ix "box_stds"
---     }
---
---   where
---     floatList = char '[' *> sepBy rational (char ',') <* char ']'
---
--- parseLit :: HasCallStack => P.Parser a -> Text -> Either String a
--- parseLit  c t = (parseOnly (c <* endOfInput) t)
---
--- parseLitR :: HasCallStack => P.Parser a -> Text -> a
--- parseLitR c t = parseLit c t ^?! _Right
---
+
 toTriple [a, b, c] = (a, b, c)
 toTriple x         = error (show x)
 
@@ -146,10 +133,28 @@ default_initializer name = case name of
     "features.rpn.rpn_cls_score.bias"   -> I.zeros name
     "features.rpn.rpn_bbox_pred.weight" -> I.normal 0.01 name
     "features.rpn.rpn_bbox_pred.bias"   -> I.zeros name
-    "features.rcnn.cls_score.weight"     -> I.normal 0.01 name
-    "features.rcnn.cls_score.bias"       -> I.zeros name
-    "features.rcnn.bbox_pred.weight"     -> I.normal 0.001 name
-    "features.rcnn.bbox_pred.bias"       -> I.zeros name
+    "features.rcnn.rcnn_cls_score.weight"     -> I.normal 0.01 name
+    "features.rcnn.rcnn_cls_score.bias"       -> I.zeros name
+    "features.rcnn.rcnn_bbox_feature.weight"  -> I.normal 0.01 name
+    "features.rcnn.rcnn_bbox_feature.bias"    -> I.zeros name
+    "features.rcnn.rcnn_bbox_pred.weight"     -> I.normal 0.001 name
+    "features.rcnn.rcnn_bbox_pred.bias"       -> I.zeros name
+    "features.fpn.0.conv1.weight"             -> I.normal 0.01 name
+    "features.fpn.0.conv1.bias"               -> I.zeros name
+    "features.fpn.0.conv2.weight"             -> I.normal 0.01 name
+    "features.fpn.0.conv2.bias"               -> I.zeros name
+    "features.fpn.1.conv1.weight"             -> I.normal 0.01 name
+    "features.fpn.1.conv1.bias"               -> I.zeros name
+    "features.fpn.1.conv2.weight"             -> I.normal 0.01 name
+    "features.fpn.1.conv2.bias"               -> I.zeros name
+    "features.fpn.2.conv1.weight"             -> I.normal 0.01 name
+    "features.fpn.2.conv1.bias"               -> I.zeros name
+    "features.fpn.2.conv2.weight"             -> I.normal 0.01 name
+    "features.fpn.2.conv2.bias"               -> I.zeros name
+    "features.fpn.3.conv1.weight"             -> I.normal 0.01 name
+    "features.fpn.3.conv1.bias"               -> I.zeros name
+    "features.fpn.3.conv2.weight"             -> I.normal 0.01 name
+    "features.fpn.3.conv2.bias"               -> I.zeros name
     _ | T.isSuffixOf ".running_mean" name -> I.zeros name
       | T.isSuffixOf ".running_var"  name -> I.zeros name
       | otherwise -> I.empty name
@@ -165,10 +170,29 @@ loadWeights weights_path = do
                                      "features.rpn.rpn_cls_score.bias",
                                      "features.rpn.rpn_bbox_pred.weight",
                                      "features.rpn.rpn_bbox_pred.bias",
-                                     "features.rcnn.cls_score.weight",
-                                     "features.rcnn.cls_score.bias",
-                                     "features.rcnn.bbox_pred.weight",
-                                     "features.rcnn.bbox_pred.bias"]
+                                     "features.rcnn.rcnn_cls_score.weight",
+                                     "features.rcnn.rcnn_cls_score.bias",
+                                     "features.rcnn.rcnn_bbox_feature.weight",
+                                     "features.rcnn.rcnn_bbox_feature.bias",
+                                     "features.rcnn.rcnn_bbox_pred.weight",
+                                     "features.rcnn.rcnn_bbox_pred.bias",
+                                     "features.fpn.0.conv1.weight",
+                                     "features.fpn.0.conv1.bias",
+                                     "features.fpn.0.conv2.weight",
+                                     "features.fpn.0.conv2.bias",
+                                     "features.fpn.1.conv1.weight",
+                                     "features.fpn.1.conv1.bias",
+                                     "features.fpn.1.conv2.weight",
+                                     "features.fpn.1.conv2.bias",
+                                     "features.fpn.2.conv1.weight",
+                                     "features.fpn.2.conv1.bias",
+                                     "features.fpn.2.conv2.weight",
+                                     "features.fpn.2.conv2.bias",
+                                     "features.fpn.3.conv1.weight",
+                                     "features.fpn.3.conv1.bias",
+                                     "features.fpn.3.conv2.weight",
+                                     "features.fpn.3.conv2.bias"
+                                    ]
 
 data Stage = TRAIN
     | INFERENCE
@@ -185,6 +209,8 @@ fixedParams backbone stage symbol = do
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
                                         -- , layer n `elemL` ["1", "5"]]
+        (TRAIN, RESNET50FPN) -> S.fromList [n | n <- argnames
+                                           , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
         (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
@@ -217,7 +243,6 @@ main :: IO ()
 main = do
     _    <- mxListAllOpNames
     registerCustomOperator ("anchor_generator", Anchor.buildAnchorGenerator)
-    -- registerCustomOperator ("proposal_target", buildProposalTargetProp)
 
     (rcnn_conf, pg_conf@ProgConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
     if pg_infer then
@@ -233,8 +258,8 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     coco_inst@(Coco.Coco _ _ coco_inst_ _) <- Coco.coco ds_base_path "val2017"
     sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
-                _cfg_data  = M.fromList [("data",    (STensor [3, ds_img_size, ds_img_size])),
-                ("im_info", (STensor [3]))],
+                _cfg_data  = M.fromList [("data",    (STensor [batch_size, 3, ds_img_size, ds_img_size])),
+                ("im_info", (STensor [batch_size, 3]))],
                 _cfg_label = [],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -350,15 +375,54 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     coco_inst <- Coco.coco ds_base_path "train2017"
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
-        data_iter = asyncConduit (Just rcnn_batch_size) $ Coco.cocoImagesBBoxes True .| C.chunksOf rcnn_batch_size .| C.mapM toNDArray
+        with_rpn_targets (_, img, info, gt) = liftIO $ do
+            let conf = Anchor.Configuration
+                       { Anchor._conf_anchor_scales    = rpn_anchor_scales
+                       , Anchor._conf_anchor_ratios    = rpn_anchor_ratios
+                       , Anchor._conf_anchor_base_size = rpn_anchor_base_size
+                       , Anchor._conf_allowed_border   = rpn_allowd_border
+                       , Anchor._conf_fg_num           = floor $ (rpn_fg_fraction * fromIntegral rpn_batch_rois)
+                       , Anchor._conf_batch_num        = rpn_batch_rois
+                       , Anchor._conf_bg_overlap       = rpn_bg_overlap
+                       , Anchor._conf_fg_overlap       = rpn_fg_overlap
+                       }
+                extract = sequential "features" . features1 backbone
+            (cls_targets, box_targets, box_masks) <- generateTargets extract info (RNE.fromList feature_strides) conf (V.toList gt)
+            img  <- fromRepa img
+            info <- fromRepa info
+            gt   <- fromRepa $ evstack gt
+            return (img, info, gt, cls_targets, box_targets, box_masks)
+
+        evstack arrs = vstack $ V.map (expandDim 0) arrs
+
+        concat_batch batch = liftIO $ do
+            let (imgs, infos, gts, cts, bts, bms) = unzip6 batch
+                stack arrs = sing A.stack (#data := map unNDArray arrs .& #num_args := length arrs .& #axis := 0 .& Nil)
+            imgs  <- stack imgs
+            infos <- stack infos
+            gts   <- padLength gts (-1) >>= stack
+            cts   <- stack cts
+            bts   <- stack bts
+            bms   <- stack bms
+            return (NDArray imgs, NDArray infos, NDArray gts, NDArray cts, NDArray bts, NDArray bms)
+
+        data_iter = asyncConduit (Just batch_size) $
+                        Coco.cocoImagesBBoxes True .|
+                        C.mapM with_rpn_targets    .|
+                        C.chunksOf batch_size      .|
+                        C.mapM concat_batch
 
     sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
-                _cfg_data  = M.fromList [("data",     (STensor [3, ds_img_size, ds_img_size])),
-                                         ("im_info",  (STensor [3])),
-                                         ("gt_boxes", (STensor [0, 5])),
-                                         ("mean",     (STensor [4])),
-                                         ("std",      (STensor [4]))],
-                _cfg_label = [],
+                _cfg_data  = M.fromList [("data",     (STensor [batch_size, 3, ds_img_size, ds_img_size]))
+                                        ,("im_info",  (STensor [batch_size, 3]))
+                                        ,("gt_boxes", (STensor [batch_size, 1, 5]))
+                                        ],
+                _cfg_label = ["rpn_cls_targets"
+                             ,"rpn_box_targets"
+                             ,"rpn_box_masks"
+                             ,"box_reg_mean"
+                             ,"box_reg_std"
+                             ],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
                 _cfg_fixed_params = fixed_params,
@@ -370,7 +434,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
     optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
                                                    .& #wd := 0.0005
-                                                   .& #rescale_grad := 1 / (fromIntegral rcnn_batch_size)
+                                                   .& #rescale_grad := 1 / (fromIntegral batch_size)
                                                    .& #clip_gradient := 5
                                                    .& Nil)
 
@@ -391,7 +455,12 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 return epoch_next
         logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-        metric <- newMetric "train" (RPNAccMetric 0 "label" :* RCNNAccMetric 2 4 :* RPNLogLossMetric 0 "label" :* RCNNLogLossMetric 2 4 :* RPNL1LossMetric 1 "bbox_weight" :* RCNNL1LossMetric 3 4 :* MNil)
+        metric <- newMetric "train" (RPNAccMetric "rpn_cls_targets" :*
+                                     RCNNAccMetric :*
+                                     RPNLogLossMetric "rpn_cls_targets" :*
+                                     RCNNLogLossMetric :*
+                                     RPNL1LossMetric :*
+                                     RCNNL1LossMetric :* MNil)
 
         -- update the internal counting of the iterations
         -- the lr is updated as per to it
@@ -401,12 +470,16 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
             logInfo . display $ sformat ("Epoch " % int) ei
             let slice = takeD pg_train_iter_per_epoch data_iter
-            void $ forEachD_i slice $ \(i, (x0, x1, x2)) -> withSession sess $ do
-                let binding = M.fromList [ ("data",     x0)
-                                         , ("im_info",  x1)
-                                         , ("gt_boxes", x2)
-                                         , ("mean",     mean)
-                                         , ("std",      std)]
+            void $ forEachD_i slice $ \(i, (x0, x1, x2, y0, y1, y2)) -> withSession sess $ do
+                let binding = M.fromList [ ("data",            x0)
+                                         , ("im_info",         x1)
+                                         , ("gt_boxes",        x2)
+                                         , ("rpn_cls_targets", y0)
+                                         , ("rpn_box_targets", y1)
+                                         , ("rpn_box_masks",   y2)
+                                         , ("box_reg_mean",    mean)
+                                         , ("box_reg_std",     std)
+                                         ]
                 fitAndEval optimizer binding metric
                 eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
@@ -414,6 +487,54 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
+
+
+--  generateAnchors :: Int -> [Int] -> Int -> [Int] -> [Float] -> [Anchor.Anchor U]
+--  generateAnchors size strides base_size scales ratios =
+--      zipWith make all_sizes strides
+--    where
+--      all_sizes = unfoldr (\s -> Just (max 16 s, s `div` 2))
+--      make sz st = Anchor.anchors (sz, sz) st base_size scales ratios
+
+
+generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
+                -> Coco.ImageInfo
+                -> NonEmpty Int
+                -> Anchor.Configuration
+                -> [Anchor.GTBox Repa.U]
+                -> IO (NDArray Float, NDArray Float, NDArray Float)
+generateTargets feature_net im_info strides anchor_conf gt_boxes = do
+    feats  <- runLayerBuilder $ variable "data" >>= feature_net
+
+    -- if there is single feature layer, but multiple strides, then apply each stride,
+    -- otherwise, there should equally number of features and strides, and pair them.
+    -- let feat_stride | [f0] <- feats = RNE.map (\st -> (f0, st)) strides
+    --                 | otherwise     = RNE.zip feats strides
+    let feat_stride = RNE.zip feats strides
+
+    layers <- mapM (uncurry make) feat_stride
+    let (cls_targets, box_targets, box_masks) = unzip3 $ RNE.toList layers
+    cls_targets <- mapM fromRepa cls_targets
+    box_targets <- mapM fromRepa box_targets
+    box_masks   <- mapM fromRepa box_masks
+    cls_targets <- sing A._Concat (#data := map unNDArray cls_targets .& #num_args := length cls_targets .& #dim := 0 .& Nil)
+    box_targets <- sing A._Concat (#data := map unNDArray box_targets .& #num_args := length box_targets .& #dim := 0 .& Nil)
+    box_masks   <- sing A._Concat (#data := map unNDArray box_masks   .& #num_args := length box_masks   .& #dim := 0 .& Nil)
+    return (NDArray cls_targets, NDArray box_targets, NDArray box_masks)
+
+  where
+    [img_height, img_width, _] = Repa.toList im_info
+    -- we have padded the image to a square
+    img_size = floor (max img_height img_width)
+    base_size = anchor_conf ^. Anchor.conf_anchor_base_size
+    scales    = anchor_conf ^. Anchor.conf_anchor_scales
+    ratios    = anchor_conf ^. Anchor.conf_anchor_ratios
+    make :: SymbolHandle -> Int -> IO (Anchor.Labels, Anchor.Targets, Anchor.Weights)
+    make feat stride = do
+        (_, outputs, _, _) <- inferShape feat [("data", STensor [1,3,img_size,img_size])]
+        let [(_, STensor [_, _, h, w])] = outputs
+            anchors = Anchor.anchors (h, w) stride base_size scales ratios
+        runReaderT (Anchor.assign (V.fromList gt_boxes) img_size img_size anchors) anchor_conf
 
 
 toNDArray :: MonadIO m => [(String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)] -> m (NDArray Float, NDArray Float, NDArray Float)
@@ -430,3 +551,17 @@ repaToNDArray :: Repa.Shape sh => Array U sh Float -> IO (NDArray Float)
 repaToNDArray arr = do
     let Just sh = nonEmpty $ reverse $ Repa.listOfShape $ Repa.extent arr
     fromVector sh $ VS.convert $ Repa.toUnboxed arr
+
+padLength :: DType a => [NDArray a] -> a -> IO [NDArray a]
+padLength arrays value = do
+    nums <- mapM (\a -> ndshape a >>= return . RNE.head) arrays
+    let max_num = maximum nums
+    forM (zip arrays nums) $ \(a, n) ->
+        if n == max_num
+        then return a
+        else do
+            padding <- full value [max_num - n, 5]
+            NDArray <$> sing A._Concat
+                  (#data := [unNDArray a, unNDArray padding]
+                .& #num_args := 2
+                .& #dim := 0 .& Nil)

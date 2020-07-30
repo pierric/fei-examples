@@ -28,6 +28,7 @@ type instance ParameterList "WithAnchors" =
 
        '("anchor_scales",  'AttrOpt [Int]),
        '("anchor_ratios",  'AttrOpt [Float]),
+       '("anchor_base_size", 'AttrOpt Int),
        '("allowed_border", 'AttrOpt Int),
        '("batch_rois",     'AttrOpt Int),
        '("fg_fraction",    'AttrOpt Float),
@@ -53,10 +54,12 @@ withAnchors args = do
     maxGT = fromMaybe Nothing $ args !? #fixed_num_gt
     scales = fromMaybe [8, 16, 32] $ args !? #anchor_scales
     ratios = fromMaybe [0.5, 1, 2] $ args !? #anchor_ratios
-    anchors = Anchor.anchors (featH, featW) featureStride 32 scales ratios
+    base_size = fromMaybe 32 $ args !? #anchor_base_size
+    anchors = Anchor.anchors (featH, featW) featureStride base_size scales ratios
     anchConf = Anchor.Configuration {
         Anchor._conf_anchor_scales  = scales,
         Anchor._conf_anchor_ratios  = ratios,
+        Anchor._conf_anchor_base_size = base_size,
         Anchor._conf_allowed_border = fromMaybe 0 $ args !? #allowed_border,
         Anchor._conf_fg_num         = floor $ (fromMaybe 0.5 $ args !? #fg_fraction) * fromIntegral batchRois,
         Anchor._conf_batch_num      = batchRois,
