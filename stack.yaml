@@ -9,15 +9,16 @@ resolver: lts-14.27
 #ghc-variant: dwarf
 ghc-options:
     "$everything": -threaded
+    "fei-examples": -rtsopts
 packages:
 - .
-extra-deps:
 - ../fei-base
 - ../fei-nn
 - ../fei-cocoapi
 - ../fei-datasets
 - ../fei-modelzoo
 - ../tuple-ops
+extra-deps:
 - git: https://github.com/0xCM/type-combinators.git
   commit: 58167dd4017b666ff592bb9493b0570a054aabdb
 - git: https://github.com/pierric/haskell-src-exts.git

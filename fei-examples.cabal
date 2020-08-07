@@ -79,7 +79,6 @@ Executable custom-op
                       , NoImplicitPrelude
 Executable faster-rcnn
   main-is:             faster-rcnn.hs
-  other-modules:       DataIter.Coco
   hs-source-dirs:      src
   ghc-options:          -Wall
   default-language:     Haskell2010

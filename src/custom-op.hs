@@ -1,22 +1,22 @@
 module Main where
 
 import           Formatting
-import           RIO                          hiding (Const)
-import qualified RIO.HashMap                  as M
-import qualified RIO.HashSet                  as S
-import           RIO.List                     (unzip)
-import qualified RIO.NonEmpty                 as RNE
-import qualified RIO.Text                     as T
-import qualified RIO.Vector.Boxed             as V
-import qualified RIO.Vector.Storable          as SV
+import           RIO                         hiding (Const)
+import qualified RIO.HashMap                 as M
+import qualified RIO.HashSet                 as S
+import           RIO.List                    (unzip)
+import qualified RIO.NonEmpty                as RNE
+import qualified RIO.Text                    as T
+import qualified RIO.Vector.Boxed            as V
+import qualified RIO.Vector.Storable         as SV
 
 import           MXNet.Base
-import qualified MXNet.Base.Operators.NDArray as A
-import           MXNet.Base.Operators.Symbol  (_Custom)
+import           MXNet.Base.Operators.Tensor
 import           MXNet.NN
 import           MXNet.NN.DataIter.Class
 import           MXNet.NN.DataIter.Streaming
-import qualified MXNet.NN.Initializer         as I
+import qualified MXNet.NN.Initializer        as I
+import           MXNet.NN.Layer
 
 type ArrayF = NDArray Float
 
@@ -41,14 +41,14 @@ instance CustomOperationProp SoftmaxProp where
 
 instance CustomOperation (Operation SoftmaxProp) where
     forward _ [ReqWrite] [in_data, label] [out] aux is_train = do
-        label <- sing A.one_hot (#indices := label .& #depth := 10 .& Nil)
-        r <- sing A.softmax (#data := in_data .& Nil)
-        A._copyto_upd [out] (#data := r .& Nil)
+        label <- prim _one_hot (#indices := label .& #depth := 10 .& Nil)
+        r <- prim _softmax (#data := in_data .& Nil)
+        void $ copy r out
 
     backward _ [ReqWrite] [_, label] [out] [in_grad, _] _ aux = do
-        label <- sing A.one_hot (#indices := label .& #depth := 10 .& Nil)
-        result <- sing A.elemwise_sub (#lhs := out .& #rhs := label .& Nil)
-        A._copyto_upd [in_grad] (#data := result .& Nil)
+        label <- prim _one_hot (#indices := label .& #depth := 10 .& Nil)
+        result <- prim _elemwise_sub (#lhs := out .& #rhs := label .& Nil)
+        void $ copy result in_grad
 
 
 symbol :: Layer SymbolHandle
@@ -65,7 +65,7 @@ symbol = do
         a2 <- activation  (#data := v2 .& #act_type := #tanh .& Nil)
         p2 <- pooling     (#data := a2 .& #kernel := [2,2] .& #pool_type := #max .& Nil)
 
-        fl <- flatten     (#data := p2 .& Nil)
+        fl <- flatten     p2
 
         v3 <- fullyConnected (#data := fl .& #num_hidden := 500 .& Nil)
         a3 <- activation     (#data := v3 .& #act_type := #tanh .& Nil)
@@ -122,7 +122,7 @@ main = do
             logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int) i total2
             ~[y'] <- forwardOnly (M.singleton "x" x)
             ind1 <- liftIO $ toVector y
-            ind2 <- liftIO $ argmax y' >>= toVector
+            ind2 <- liftIO $ argmax y' (Just 1) False >>= toVector
             return (ind1, ind2)
 
         let (ls,ps) = unzip result
@@ -132,6 +132,3 @@ main = do
             correct = SV.length $ SV.filter id $ SV.zipWith (==) ls_unbatched ps_unbatched
         logInfo . display $ sformat ("Accuracy: " % int % "/" % int) correct total_test_items
 
-  where
-    argmax :: ArrayF -> IO ArrayF
-    argmax (NDArray ys) = NDArray <$> sing A.argmax (#data := ys .& #axis := Just 1 .& Nil)

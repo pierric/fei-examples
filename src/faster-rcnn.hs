@@ -43,30 +43,17 @@ import qualified RIO.Vector.Unboxed                as VU
 import qualified RIO.Vector.Unboxed.Partial        as VU ((//))
 import qualified Text.PrettyPrint.Leijen.Text      as PP
 
-import qualified DataIter.Coco                     as Coco
-import           MXNet.Base                        (ArgOf (..), DType,
-                                                    FShape (..), HMap (..),
-                                                    NDArray (..), SymbolHandle,
-                                                    contextCPU, contextGPU0,
-                                                    fromRepa, fromVector, full,
-                                                    getInternalByName,
-                                                    inferOutputShape,
-                                                    inferShape, listArguments,
-                                                    mxListAllOpNames,
-                                                    mxNotifyShutdown, ndshape,
-                                                    registerCustomOperator,
-                                                    sing, toRepa, (.&))
-import qualified MXNet.Base.Operators.NDArray      as A
+import           MXNet.Base
 import qualified MXNet.Base.ParserUtils            as P
 import           MXNet.Coco.Types                  (images, img_id)
 import           MXNet.NN
 import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
-import           MXNet.NN.DataIter.ConduitAsync
+-- import           MXNet.NN.DataIter.ConduitAsync
+import           MXNet.NN.DataIter.Conduit
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
 import           MXNet.NN.ModelZoo.Utils.Box
-import qualified MXNet.NN.NDArray                  as A
 
 data ProgConfig = ProgConfig
     { ds_base_path            :: String
@@ -209,8 +196,7 @@ fixedParams backbone stage symbol = do
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
                                         -- , layer n `elemL` ["1", "5"]]
-        (TRAIN, RESNET50FPN) -> S.fromList [n | n <- argnames
-                                           , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
+        (TRAIN, RESNET50FPN) -> S.fromList [n | n <- argnames, layer n `elemL` ["1", "5"]]
         (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
                                         -- fix conv_0, stage_1_*, *_gamma, *_beta
                                         , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
@@ -274,10 +260,10 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
     runApp coco_conf $ withSession sess $ do
         (img_tensor_r, img_info_r) <- Coco.loadImage img
-        img_tensor <- liftIO $ Coco.repaToNDArray img_tensor_r
-        img_info   <- liftIO $ Coco.repaToNDArray img_info_r
-        img_tensor <- liftIO $ A.expandDims img_tensor 0
-        img_info   <- liftIO $ A.expandDims img_info   0
+        img_tensor <- liftIO $ repaToNDArray img_tensor_r
+        img_info   <- liftIO $ repaToNDArray img_info_r
+        img_tensor <- liftIO $ expandDims 0 img_tensor
+        img_info   <- liftIO $ expandDims 0 img_info
 
         checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
         case checkpoint of
@@ -397,20 +383,25 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
         concat_batch batch = liftIO $ do
             let (imgs, infos, gts, cts, bts, bms) = unzip6 batch
-                stack arrs = sing A.stack (#data := map unNDArray arrs .& #num_args := length arrs .& #axis := 0 .& Nil)
-            imgs  <- stack imgs
-            infos <- stack infos
-            gts   <- padLength gts (-1) >>= stack
-            cts   <- stack cts
-            bts   <- stack bts
-            bms   <- stack bms
-            return (NDArray imgs, NDArray infos, NDArray gts, NDArray cts, NDArray bts, NDArray bms)
+            imgs  <- stack 0 imgs
+            infos <- stack 0 infos
+            gts   <- stack 0 =<< padLength gts (-1)
+            cts   <- stack 0 cts
+            bts   <- stack 0 bts
+            bms   <- stack 0 bms
+            return (imgs, infos, gts, cts, bts, bms)
 
-        data_iter = asyncConduit (Just batch_size) $
-                        Coco.cocoImagesBBoxes True .|
-                        C.mapM with_rpn_targets    .|
-                        C.chunksOf batch_size      .|
-                        C.mapM concat_batch
+        -- There is a serious problem with asyncConduit. It made the training loop running
+        -- in different threads, which is very bad because the execution of ExecutorForward
+        -- has a thread-local state (saving the temporary workspace for cudnn)
+        --
+        -- data_iter = asyncConduit (Just batch_size) $
+        --
+        data_iter = ConduitData (Just batch_size) $
+                    Coco.cocoImagesBBoxes True .|
+                    C.mapM with_rpn_targets    .|
+                    C.chunksOf batch_size      .|
+                    C.mapM concat_batch
 
     sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
                 _cfg_data  = M.fromList [("data",     (STensor [batch_size, 3, ds_img_size, ds_img_size]))
@@ -437,6 +428,8 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                                    .& #rescale_grad := 1 / (fromIntegral batch_size)
                                                    .& #clip_gradient := 5
                                                    .& Nil)
+    -- optimizer <- makeOptimizer SGD (Const 0.001) (#rescale_grad := 1 / (fromIntegral batch_size)
+    --                                            .& #clip_gradient := 5 .& Nil)
 
     runApp coco_conf $ do
         checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
@@ -483,18 +476,26 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 fitAndEval optimizer binding metric
                 eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
+
+                -- params <- use (untag . mod_params)
+                -- let calcSize (ParameterV a) = ndsize a
+                --     calcSize (ParameterF a) = ndsize a
+                --     calcSize (ParameterA a) = ndsize a
+                --     calcSize (ParameterG a b) = liftM2 (+) (ndsize a) (ndsize b)
+                --     arrays (ParameterV a)   = ([a] :: [NDArray Float])
+                --     arrays (ParameterF a)   = [a]
+                --     arrays (ParameterA a)   = [a]
+                --     arrays (ParameterG a b) = [a, b]
+                -- arrs <- liftIO $ mapM calcSize params
+                -- size <- return $ sum arrs
+                -- traceShowM ("total params (#float)", size)
+
                 logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
+                -- liftIO waitAll
+                -- liftIO performMajorGC
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
-
-
---  generateAnchors :: Int -> [Int] -> Int -> [Int] -> [Float] -> [Anchor.Anchor U]
---  generateAnchors size strides base_size scales ratios =
---      zipWith make all_sizes strides
---    where
---      all_sizes = unfoldr (\s -> Just (max 16 s, s `div` 2))
---      make sz st = Anchor.anchors (sz, sz) st base_size scales ratios
 
 
 generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
@@ -517,10 +518,10 @@ generateTargets feature_net im_info strides anchor_conf gt_boxes = do
     cls_targets <- mapM fromRepa cls_targets
     box_targets <- mapM fromRepa box_targets
     box_masks   <- mapM fromRepa box_masks
-    cls_targets <- sing A._Concat (#data := map unNDArray cls_targets .& #num_args := length cls_targets .& #dim := 0 .& Nil)
-    box_targets <- sing A._Concat (#data := map unNDArray box_targets .& #num_args := length box_targets .& #dim := 0 .& Nil)
-    box_masks   <- sing A._Concat (#data := map unNDArray box_masks   .& #num_args := length box_masks   .& #dim := 0 .& Nil)
-    return (NDArray cls_targets, NDArray box_targets, NDArray box_masks)
+    cls_targets <- concat_ 0 cls_targets
+    box_targets <- concat_ 0 box_targets
+    box_masks   <- concat_ 0 box_masks
+    return (cls_targets, box_targets, box_masks)
 
   where
     [img_height, img_width, _] = Repa.toList im_info
@@ -561,7 +562,4 @@ padLength arrays value = do
         then return a
         else do
             padding <- full value [max_num - n, 5]
-            NDArray <$> sing A._Concat
-                  (#data := [unNDArray a, unNDArray padding]
-                .& #num_args := 2
-                .& #dim := 0 .& Nil)
+            concat_ 0 [a, padding]
