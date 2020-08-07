@@ -491,8 +491,6 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 -- traceShowM ("total params (#float)", size)
 
                 logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
-                -- liftIO waitAll
-                -- liftIO performMajorGC
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
