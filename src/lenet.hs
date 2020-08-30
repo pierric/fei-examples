@@ -1,19 +1,18 @@
 module Main where
 
-import           Formatting                   (int, sformat, stext, (%))
-import           RIO                          hiding (Const)
-import qualified RIO.HashMap                  as M
-import qualified RIO.HashSet                  as S
-import           RIO.List                     (unzip)
-import qualified RIO.Vector.Boxed             as V
-import qualified RIO.Vector.Storable          as SV
+import           Formatting                (int, sformat, stext, (%))
+import           RIO                       hiding (Const)
+import qualified RIO.HashMap               as M
+import qualified RIO.HashSet               as S
+import           RIO.List                  (unzip)
+import qualified RIO.Vector.Boxed          as V
+import qualified RIO.Vector.Storable       as SV
 
 import           MXNet.Base
-import qualified MXNet.Base.Operators.NDArray as A
 import           MXNet.NN
 import           MXNet.NN.DataIter.Conduit
-import qualified MXNet.NN.Initializer         as I
-import qualified MXNet.NN.ModelZoo.Lenet      as Model
+import qualified MXNet.NN.Initializer      as I
+import qualified MXNet.NN.ModelZoo.Lenet   as Model
 
 type ArrayF = NDArray Float
 
@@ -71,7 +70,7 @@ main = do
                 logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % " " % stext) i total2 eval
                 let [y'] = pred
                 ind1 <- liftIO $ toVector y
-                ind2 <- liftIO $ argmax y' >>= toVector
+                ind2 <- liftIO $ argmax y' (Just 1) False >>= toVector
                 return (ind1, ind2)
 
             let (ls,ps) = unzip result
@@ -80,6 +79,3 @@ main = do
                 total_test_items = SV.length ls_unbatched
                 correct = SV.length $ SV.filter id $ SV.zipWith (==) ls_unbatched ps_unbatched
             logInfo . display $ sformat ("Accuracy: " % int % "/" % int) correct total_test_items
-
-   where
-     argmax (NDArray ys) = NDArray <$> sing A.argmax (#data := ys .& #axis := Just 1 .& Nil)

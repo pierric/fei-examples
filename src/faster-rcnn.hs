@@ -30,8 +30,9 @@ import           RIO.Directory                     (canonicalizePath,
 import           RIO.FilePath
 import qualified RIO.HashMap                       as M
 import qualified RIO.HashSet                       as S
-import           RIO.List                          (sort, unzip3, unzip6)
-import           RIO.List.Partial                  (last, maximum)
+import           RIO.List                          (lastMaybe, sort, unzip3,
+                                                    unzip7)
+import           RIO.List.Partial                  (maximum)
 import           RIO.NonEmpty                      (nonEmpty)
 import qualified RIO.NonEmpty                      as RNE
 import qualified RIO.NonEmpty.Partial              as RNE
@@ -43,30 +44,17 @@ import qualified RIO.Vector.Unboxed                as VU
 import qualified RIO.Vector.Unboxed.Partial        as VU ((//))
 import qualified Text.PrettyPrint.Leijen.Text      as PP
 
-import qualified DataIter.Coco                     as Coco
-import           MXNet.Base                        (ArgOf (..), DType,
-                                                    FShape (..), HMap (..),
-                                                    NDArray (..), SymbolHandle,
-                                                    contextCPU, contextGPU0,
-                                                    fromRepa, fromVector, full,
-                                                    getInternalByName,
-                                                    inferOutputShape,
-                                                    inferShape, listArguments,
-                                                    mxListAllOpNames,
-                                                    mxNotifyShutdown, ndshape,
-                                                    registerCustomOperator,
-                                                    sing, toRepa, (.&))
-import qualified MXNet.Base.Operators.NDArray      as A
+import           MXNet.Base
 import qualified MXNet.Base.ParserUtils            as P
 import           MXNet.Coco.Types                  (images, img_id)
 import           MXNet.NN
 import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
-import           MXNet.NN.DataIter.ConduitAsync
+-- import           MXNet.NN.DataIter.ConduitAsync
+import           MXNet.NN.DataIter.Conduit
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
 import           MXNet.NN.ModelZoo.Utils.Box
-import qualified MXNet.NN.NDArray                  as A
 
 data ProgConfig = ProgConfig
     { ds_base_path            :: String
@@ -139,59 +127,31 @@ default_initializer name = case name of
     "features.rcnn.rcnn_bbox_feature.bias"    -> I.zeros name
     "features.rcnn.rcnn_bbox_pred.weight"     -> I.normal 0.001 name
     "features.rcnn.rcnn_bbox_pred.bias"       -> I.zeros name
-    "features.fpn.0.conv1.weight"             -> I.normal 0.01 name
-    "features.fpn.0.conv1.bias"               -> I.zeros name
-    "features.fpn.0.conv2.weight"             -> I.normal 0.01 name
-    "features.fpn.0.conv2.bias"               -> I.zeros name
-    "features.fpn.1.conv1.weight"             -> I.normal 0.01 name
-    "features.fpn.1.conv1.bias"               -> I.zeros name
-    "features.fpn.1.conv2.weight"             -> I.normal 0.01 name
-    "features.fpn.1.conv2.bias"               -> I.zeros name
-    "features.fpn.2.conv1.weight"             -> I.normal 0.01 name
-    "features.fpn.2.conv1.bias"               -> I.zeros name
-    "features.fpn.2.conv2.weight"             -> I.normal 0.01 name
-    "features.fpn.2.conv2.bias"               -> I.zeros name
-    "features.fpn.3.conv1.weight"             -> I.normal 0.01 name
-    "features.fpn.3.conv1.bias"               -> I.zeros name
-    "features.fpn.3.conv2.weight"             -> I.normal 0.01 name
-    "features.fpn.3.conv2.bias"               -> I.zeros name
+    "features.fpn.0.conv1.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.0.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.1.conv1.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.1.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.2.conv1.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.2.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.3.conv1.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "features.fpn.3.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
     _ | T.isSuffixOf ".running_mean" name -> I.zeros name
-      | T.isSuffixOf ".running_var"  name -> I.zeros name
-      | otherwise -> I.empty name
+      | T.isSuffixOf ".running_var"  name -> I.ones name
+      | T.isSuffixOf ".beta"         name -> I.zeros name
+      | T.isSuffixOf ".gamma"        name -> I.ones  name
+      | otherwise -> I.zeros name
 
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
     e <- liftIO $ doesFileExist (weights_path ++ ".params")
     if not e
         then lift . logInfo . display $ sformat ("'" % string % ".params' doesn't exist.") weights_path
-        else loadState weights_path ["features.rpn.rpn_conv_3x3.weight",
-                                     "features.rpn.rpn_conv_3x3.bias",
-                                     "features.rpn.rpn_cls_score.weight",
-                                     "features.rpn.rpn_cls_score.bias",
-                                     "features.rpn.rpn_bbox_pred.weight",
-                                     "features.rpn.rpn_bbox_pred.bias",
-                                     "features.rcnn.rcnn_cls_score.weight",
-                                     "features.rcnn.rcnn_cls_score.bias",
-                                     "features.rcnn.rcnn_bbox_feature.weight",
-                                     "features.rcnn.rcnn_bbox_feature.bias",
-                                     "features.rcnn.rcnn_bbox_pred.weight",
-                                     "features.rcnn.rcnn_bbox_pred.bias",
-                                     "features.fpn.0.conv1.weight",
-                                     "features.fpn.0.conv1.bias",
-                                     "features.fpn.0.conv2.weight",
-                                     "features.fpn.0.conv2.bias",
-                                     "features.fpn.1.conv1.weight",
-                                     "features.fpn.1.conv1.bias",
-                                     "features.fpn.1.conv2.weight",
-                                     "features.fpn.1.conv2.bias",
-                                     "features.fpn.2.conv1.weight",
-                                     "features.fpn.2.conv1.bias",
-                                     "features.fpn.2.conv2.weight",
-                                     "features.fpn.2.conv2.bias",
-                                     "features.fpn.3.conv1.weight",
-                                     "features.fpn.3.conv1.bias",
-                                     "features.fpn.3.conv2.weight",
-                                     "features.fpn.3.conv2.bias"
+        else loadState weights_path ["features.9.gamma",
+                                     "features.9.beta",
+                                     "features.9.running_var",
+                                     "features.9.running_mean",
+                                     "output.weight",
+                                     "output.bias"
                                     ]
 
 data Stage = TRAIN
@@ -201,27 +161,28 @@ fixedParams :: Backbone -> Stage -> SymbolHandle -> IO (HashSet Text)
 fixedParams backbone stage symbol = do
     argnames <- listArguments symbol
     return $ case (stage, backbone) of
-        (INFERENCE, _)    -> S.fromList argnames
-        (TRAIN, VGG16)    -> S.fromList [n | n <- argnames
-                                        -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
-                                        , layer n `elemL` ["0", "2", "5", "7"]]
-        (TRAIN, RESNET50) -> S.fromList [n | n <- argnames
-                                        -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
-                                        -- , layer n `elemL` ["1", "5"]]
-        (TRAIN, RESNET50FPN) -> S.fromList [n | n <- argnames
-                                           , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
-        (TRAIN, RESNET101)-> S.fromList [n | n <- argnames
-                                        -- fix conv_0, stage_1_*, *_gamma, *_beta
-                                        , layer n `elemL` ["1", "5"] || name n `elemL` ["gamma", "beta"]]
+        (INFERENCE, _)
+            -> S.fromList argnames
+        (TRAIN, VGG16)
+            -> S.fromList [n | n <- argnames
+                          -- fix conv_1_1, conv_1_2, conv_2_1, conv_2_2
+                          ,  elemM [0, 2, 5, 7] (layer n)]
+        (TRAIN, r) | r `elem` ([RESNET50, RESNET50FPN, RESNET101] :: [Backbone])
+            -> S.fromList [n | n <- argnames
+                          -- fix conv_0, stage_1_*, *_gamma, *_beta
+                          , let layer_idx = layer n
+                          , elemM [0, 1, 5] layer_idx ||
+                            (leqM 9 layer_idx && elemM ["gamma", "beta"] (lastName n))]
 
   where
+    toMaybe = either (const Nothing) Just
     layer param = case T.split (=='.') param of
-                    "features":n:_ -> n
-                    _              -> "<na>"
-    name  param = last $ T.split (=='.') param
-    elemL :: Eq a => a -> [a] -> Bool
-    elemL = elem
+                    "features":n:_ -> toMaybe $ P.parseOnly P.decimal n
+                    _              -> Nothing
+    lastName = lastMaybe . T.split (=='.')
+    elemM :: Eq a => [a] -> Maybe a -> Bool
+    elemM b = isJust . (>>= guard) . liftM (`elem` b)
+    leqM  n = isJust . (>>= guard) . liftM (<= n)
 
 data App c = App LogFunc c
 makePrisms ''App
@@ -274,10 +235,10 @@ mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
     runApp coco_conf $ withSession sess $ do
         (img_tensor_r, img_info_r) <- Coco.loadImage img
-        img_tensor <- liftIO $ Coco.repaToNDArray img_tensor_r
-        img_info   <- liftIO $ Coco.repaToNDArray img_info_r
-        img_tensor <- liftIO $ A.expandDims img_tensor 0
-        img_info   <- liftIO $ A.expandDims img_info   0
+        img_tensor <- liftIO $ repaToNDArray img_tensor_r
+        img_info   <- liftIO $ repaToNDArray img_info_r
+        img_tensor <- liftIO $ expandDims 0 img_tensor
+        img_info   <- liftIO $ expandDims 0 img_info
 
         checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
         case checkpoint of
@@ -375,7 +336,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     coco_inst <- Coco.coco ds_base_path "train2017"
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
-        with_rpn_targets (_, img, info, gt) = liftIO $ do
+        with_rpn_targets (filename, img, info, gt) = liftIO $ do
             let conf = Anchor.Configuration
                        { Anchor._conf_anchor_scales    = rpn_anchor_scales
                        , Anchor._conf_anchor_ratios    = rpn_anchor_ratios
@@ -391,26 +352,31 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
             img  <- fromRepa img
             info <- fromRepa info
             gt   <- fromRepa $ evstack gt
-            return (img, info, gt, cls_targets, box_targets, box_masks)
+            return (filename, img, info, gt, cls_targets, box_targets, box_masks)
 
         evstack arrs = vstack $ V.map (expandDim 0) arrs
 
         concat_batch batch = liftIO $ do
-            let (imgs, infos, gts, cts, bts, bms) = unzip6 batch
-                stack arrs = sing A.stack (#data := map unNDArray arrs .& #num_args := length arrs .& #axis := 0 .& Nil)
-            imgs  <- stack imgs
-            infos <- stack infos
-            gts   <- padLength gts (-1) >>= stack
-            cts   <- stack cts
-            bts   <- stack bts
-            bms   <- stack bms
-            return (NDArray imgs, NDArray infos, NDArray gts, NDArray cts, NDArray bts, NDArray bms)
+            let (filenames, imgs, infos, gts, cts, bts, bms) = unzip7 batch
+            imgs  <- stack 0 imgs
+            infos <- stack 0 infos
+            gts   <- stack 0 =<< padLength gts (-1)
+            cts   <- stack 0 cts
+            bts   <- stack 0 bts
+            bms   <- stack 0 bms
+            return (filenames, imgs, infos, gts, cts, bts, bms)
 
-        data_iter = asyncConduit (Just batch_size) $
-                        Coco.cocoImagesBBoxes True .|
-                        C.mapM with_rpn_targets    .|
-                        C.chunksOf batch_size      .|
-                        C.mapM concat_batch
+        -- There is a serious problem with asyncConduit. It made the training loop running
+        -- in different threads, which is very bad because the execution of ExecutorForward
+        -- has a thread-local state (saving the temporary workspace for cudnn)
+        --
+        -- data_iter = asyncConduit (Just batch_size) $
+        --
+        data_iter = ConduitData (Just batch_size) $
+                    Coco.cocoImagesBBoxes True .|
+                    C.mapM with_rpn_targets    .|
+                    C.chunksOf batch_size      .|
+                    C.mapM concat_batch
 
     sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
                 _cfg_data  = M.fromList [("data",     (STensor [batch_size, 3, ds_img_size, ds_img_size]))
@@ -432,11 +398,15 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
     mean <- fromVector [4] [0,0,0,0]
     std  <- fromVector [4] [0.1, 0.1, 0.2, 0.2]
 
-    optimizer <- makeOptimizer SGD'Mom (Const 0.001) (#momentum := 0.9
-                                                   .& #wd := 0.0005
-                                                   .& #rescale_grad := 1 / (fromIntegral batch_size)
-                                                   .& #clip_gradient := 5
-                                                   .& Nil)
+    let lr_sched = lrOfFactor (#base := 0.004 .& #factor := 0.5 .& #step := 2000 .& Nil)
+    -- optimizer <- makeOptimizer SGD'Mom lr_sched (#momentum := 0.9
+    --                                           .& #wd := 0.0001
+    --                                           .& #rescale_grad := 1 / (fromIntegral batch_size)
+    --                                           .& #clip_gradient := 10
+    --                                           .& Nil)
+    optimizer <- makeOptimizer ADAM lr_sched (#rescale_grad := 1 / (fromIntegral batch_size)
+                                           .& #wd := 0.0001
+                                           .& #clip_gradient := 10 .& Nil)
 
     runApp coco_conf $ do
         checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
@@ -464,13 +434,21 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
 
         -- update the internal counting of the iterations
         -- the lr is updated as per to it
-        withSession sess $
+        withSession sess $ do
             untag . mod_statistics . stat_num_upd .= (start_epoch - 1) * pg_train_iter_per_epoch
+
+            -- params <- use (untag . mod_params)
+            -- let hasgrad (ParameterG _ _) = True
+            --     hasgrad _                = False
+            --     nograd  (ParameterF _) = True
+            --     nograd  _              = False
+            -- traceShowM $ sort $ M.keys $ M.filter hasgrad params
+            -- traceShowM $ sort $ M.keys $ M.filter nograd  params
 
         forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
             logInfo . display $ sformat ("Epoch " % int) ei
             let slice = takeD pg_train_iter_per_epoch data_iter
-            void $ forEachD_i slice $ \(i, (x0, x1, x2, y0, y1, y2)) -> withSession sess $ do
+            void $ forEachD_i slice $ \(i, (fn, x0, x1, x2, y0, y1, y2)) -> withSession sess $ do
                 let binding = M.fromList [ ("data",            x0)
                                          , ("im_info",         x1)
                                          , ("gt_boxes",        x2)
@@ -483,18 +461,61 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 fitAndEval optimizer binding metric
                 eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
+
+                ------------------------------------------------------
+                -- code for debugging
+                ------------------------------------------------------
+                -- logInfo $ display $ tshow fn
+                -- exec <- use (untag . mod_executor)
+                -- liftIO $ do
+                --     let dir = "dumps"
+                --         file = sformat ("dumps/" % int % ".params") i
+                --     ex <- doesPathExist dir
+                --     when (not ex) (createDirectory dir)
+                --     outs  <- execGetOutputs exec
+                --     let names = ["data", "im_info", "gt_boxes",
+                --                  "rpn_cls_prob", "rpn_cls_loss",
+                --                  "rpn_bbox_loss", "cls_prob",
+                --                  "bbox_loss", "cls_targets",
+                --                  "aa", "pp", "rs", "rr"]
+                --     mxNDArraySave file $ zip names $ map unNDArray $ [x0, x1, x2] ++ outs
+
+                -- params <- use (untag . mod_params)
+                -- let calcSize (ParameterV a) = ndsize a
+                --     calcSize (ParameterF a) = ndsize a
+                --     calcSize (ParameterA a) = ndsize a
+                --     calcSize (ParameterG a b) = liftM2 (+) (ndsize a) (ndsize b)
+                --     arrays (ParameterV a)   = ([a] :: [NDArray Float])
+                --     arrays (ParameterF a)   = [a]
+                --     arrays (ParameterA a)   = [a]
+                --     arrays (ParameterG a b) = [a, b]
+                -- let hasnan (ParameterV a)   = hasnan_ a
+                --     hasnan (ParameterF a)   = hasnan_ a
+                --     hasnan (ParameterA a)   = hasnan_ a
+                --     hasnan (ParameterG a b) = hasnan_ a
+                --     hasnan_ a = do
+                --         v <- toVector a
+                --         return $ isJust $ VS.findIndex isNaN v
+                --     gradn :: Parameter Float -> IO (Maybe Float)
+                --     gradn (ParameterG _ b) = do
+                --         v <- prim _norm (#data := b .& Nil)
+                --         v <- toVector v
+                --         return $ v VS.!? 0
+                --     gradn _                = return $ Nothing
+                -- pn <- liftIO $ mapM hasnan params
+                -- traceShowM $ M.keys $ M.filter id pn
+                -- gn <- liftIO $ mapM gradn params
+                -- let gn' = M.toList $ M.filter isJust gn
+                --     gn'' = sortBy (compare `on` snd) gn'
+                -- traceShowM gn''
+                -- arrs <- liftIO $ mapM calcSize params
+                -- size <- return $ sum arrs
+                -- traceShowM ("total params (#float)", size)
+
                 logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
-
-
---  generateAnchors :: Int -> [Int] -> Int -> [Int] -> [Float] -> [Anchor.Anchor U]
---  generateAnchors size strides base_size scales ratios =
---      zipWith make all_sizes strides
---    where
---      all_sizes = unfoldr (\s -> Just (max 16 s, s `div` 2))
---      make sz st = Anchor.anchors (sz, sz) st base_size scales ratios
 
 
 generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
@@ -506,10 +527,7 @@ generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
 generateTargets feature_net im_info strides anchor_conf gt_boxes = do
     feats  <- runLayerBuilder $ variable "data" >>= feature_net
 
-    -- if there is single feature layer, but multiple strides, then apply each stride,
-    -- otherwise, there should equally number of features and strides, and pair them.
-    -- let feat_stride | [f0] <- feats = RNE.map (\st -> (f0, st)) strides
-    --                 | otherwise     = RNE.zip feats strides
+    -- there should equally number of features and strides, and pair them.
     let feat_stride = RNE.zip feats strides
 
     layers <- mapM (uncurry make) feat_stride
@@ -517,10 +535,10 @@ generateTargets feature_net im_info strides anchor_conf gt_boxes = do
     cls_targets <- mapM fromRepa cls_targets
     box_targets <- mapM fromRepa box_targets
     box_masks   <- mapM fromRepa box_masks
-    cls_targets <- sing A._Concat (#data := map unNDArray cls_targets .& #num_args := length cls_targets .& #dim := 0 .& Nil)
-    box_targets <- sing A._Concat (#data := map unNDArray box_targets .& #num_args := length box_targets .& #dim := 0 .& Nil)
-    box_masks   <- sing A._Concat (#data := map unNDArray box_masks   .& #num_args := length box_masks   .& #dim := 0 .& Nil)
-    return (NDArray cls_targets, NDArray box_targets, NDArray box_masks)
+    cls_targets <- concat_ 0 cls_targets
+    box_targets <- concat_ 0 box_targets
+    box_masks   <- concat_ 0 box_masks
+    return (cls_targets, box_targets, box_masks)
 
   where
     [img_height, img_width, _] = Repa.toList im_info
@@ -561,7 +579,4 @@ padLength arrays value = do
         then return a
         else do
             padding <- full value [max_num - n, 5]
-            NDArray <$> sing A._Concat
-                  (#data := [unNDArray a, unNDArray padding]
-                .& #num_args := 2
-                .& #dim := 0 .& Nil)
+            concat_ 0 [a, padding]
