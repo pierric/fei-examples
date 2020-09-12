@@ -78,8 +78,9 @@ Executable custom-op
                       , TypeApplications
                       , NoImplicitPrelude
 Executable faster-rcnn
+  hs-source-dirs:      src/RCNN
   main-is:             faster-rcnn.hs
-  hs-source-dirs:      src
+  other-modules:       RCNN
   ghc-options:          -Wall
   default-language:     Haskell2010
   build-depends:        base >= 4.7 && < 5.0
@@ -109,4 +110,36 @@ Executable faster-rcnn
                       , OverloadedLists
                       , TypeApplications
                       , NoImplicitPrelude
-
+Executable mask-rcnn
+  hs-source-dirs:      src/RCNN
+  main-is:             mask-rcnn.hs
+  other-modules:       RCNN
+  ghc-options:          -Wall
+  default-language:     Haskell2010
+  build-depends:        base >= 4.7 && < 5.0
+                      , optparse-applicative
+                      , attoparsec
+                      , lens
+                      , repa
+                      , random-fu
+                      , conduit
+                      , resourcet
+                      , store
+                      , wl-pprint-text
+                      , vector-algorithms
+                      , vector
+                      , formatting
+                      , rio
+                      , fei-base
+                      , fei-nn
+                      , fei-cocoapi
+                      , fei-datasets
+                      , fei-modelzoo
+  default-extensions:   OverloadedLabels
+                      , TypeFamilies
+                      , FlexibleContexts
+                      , DataKinds
+                      , OverloadedStrings
+                      , OverloadedLists
+                      , TypeApplications
+                      , NoImplicitPrelude

@@ -6,5 +6,5 @@ cradle:
       component: "fei-examples:exe:custom-op"
     - path: "./src/cifar10.hs"
       component: "fei-examples:exe:cifar10"
-    - path: "./src/faster-rcnn.hs"
+    - path: "./src/RCNN"
       component: "fei-examples:exe:faster-rcnn"
