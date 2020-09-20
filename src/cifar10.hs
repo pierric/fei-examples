@@ -1,6 +1,6 @@
 module Main where
 
-import           Control.Lens                (use)
+import           Control.Lens                (ix, use, (^?!))
 import           Formatting                  (float, formatToString, int, left,
                                               sformat, stext, (%))
 import           Options.Applicative
@@ -21,7 +21,7 @@ import qualified MXNet.NN.Initializer        as I
 import qualified MXNet.NN.ModelZoo.Resnet    as Resnet
 import qualified MXNet.NN.ModelZoo.Resnext   as Resnext
 
-type ArrayF = NDArray Float
+batch_size = 128
 
 data Model = Resnet
     | Resnext
@@ -66,7 +66,7 @@ main = do
         Just _  -> fixedParams net model
 
     sess <- newMVar =<< initialize @"cifar10" net (Config {
-                _cfg_data = M.singleton "x" (STensor [3,32,32]),
+                _cfg_data = M.singleton "x" (STensor [batch_size, 3,32,32]),
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -74,27 +74,33 @@ main = do
                 _cfg_context = contextGPU0
             })
 
-    -- cbTP <- dumpThroughputEpoch
-    -- sess <- return $ (sess_callbacks %~ ([cbTP, Callback (Checkpoint "tmp")] ++)) sess
 
     let lr_scheduler = lrOfMultifactor $ #steps := [100, 200, 300]
                                       .& #base := 0.0001
                                       .& #factor:= 0.75 .& Nil
+        ce  = CrossEntropy "out" True
+                  (\_ p -> p ^?! ix 0)
+                  (\b _ -> b ^?! ix "y")
+        acc = Accuracy "out" PredByArgmax
+                  (\_ p -> p ^?! ix 0)
+                  (\b _ -> b ^?! ix "y")
     optimizer <- makeOptimizer SGD'Mom lr_scheduler Nil
-    metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
 
     runSimpleApp $ do
 
         let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
                                          .& #data_shape  := [3,32,32]
-                                         .& #batch_size  := 128 .& Nil)
-
+                                         .& #batch_size  := batch_size .& Nil)
+            valData      = imageRecordIter (#path_imgrec := "data/cifar10_val.rec"
+                                         .& #data_shape  := [3,32,32]
+                                         .& #batch_size  := 16 .& Nil)
         withSession sess $ case pretrained of
             Just path -> loadState path ["output.weight", "output.bias"]
             Nothing   -> return ()
 
-        forM_ ([1..100] :: [Int]) $ \ ei -> do
+        forM_ ([1..20] :: [Int]) $ \ ei -> do
             logInfo . display $ sformat ("Epoch " % int) ei
+            metric <- newMetric "train" (ce :* acc :* MNil)
             void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
                 let binding = M.fromList [("x", x), ("y", y)]
                 fitAndEval optimizer binding metric
@@ -103,8 +109,12 @@ main = do
                 when (i `mod` 20 == 0) $ do
                     logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
 
-            withSession sess $ saveState (ei == 1)
-                (formatToString ("checkpoints/cifar10_resnet50_epoch_" % left 3 '0') ei)
+            metric <- newMetric "val" (acc :* MNil)
+            void $ forEachD_i valData $ \(i, (x, y)) -> withSession sess $ do
+                pred <- forwardOnly (M.singleton "x" x)
+                void $ evalMetric metric (M.singleton "y" y) pred
+            eval <- formatMetric metric
+            logInfo . display $ sformat ("Validation: " % stext) eval
 
 fixedParams symbol _ = do
     argnames <- listArguments symbol
