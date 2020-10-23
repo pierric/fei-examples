@@ -9,18 +9,17 @@ import           Control.Applicative               (ZipList (..))
 import           Control.Lens                      (makePrisms, _1, _2)
 import           Control.Monad.Trans.Resource
 import qualified Data.Array.Repa                   as Repa
-import           Data.Bitraversable                (bitraverse)
 import           Formatting                        (sformat, string, (%))
-import           Options.Applicative               (Parser, auto, eitherReader,
-                                                    help, long, metavar, option,
+import           Options.Applicative               (Parser, ReadM, auto,
+                                                    eitherReader, help, long,
+                                                    metavar, option,
                                                     showDefault, strOption,
-                                                    switch, value)
+                                                    value)
 import           RIO
 import           RIO.Directory                     (canonicalizePath,
                                                     doesFileExist)
 import qualified RIO.HashSet                       as S
-import           RIO.List                          (lastMaybe, unzip, unzip3,
-                                                    unzip7)
+import           RIO.List                          (lastMaybe, unzip, unzip3)
 import           RIO.List.Partial                  (maximum)
 import qualified RIO.NonEmpty                      as RNE
 import qualified RIO.NonEmpty.Partial              as RNE
@@ -36,138 +35,189 @@ import qualified MXNet.NN.DataIter.Coco            as Coco
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
 
-data ProgConfig = ProgConfig
-    { ds_base_path            :: String
-    , ds_img_size             :: Int
-    , ds_img_pixel_means      :: [Float]
-    , ds_img_pixel_stds       :: [Float]
-    , pg_train_epochs         :: Int
-    , pg_train_iter_per_epoch :: Int
-    , pg_infer                :: Bool
-    , pg_infer_image_id       :: Int
+data CommonArgs = CommonArgs
+    { ds_base_path       :: String
+    , ds_img_size        :: Int
+    , ds_img_pixel_means :: [Float]
+    , ds_img_pixel_stds  :: [Float]
     }
     deriving Show
 
-cmdArgParser :: Parser (RcnnConfiguration, ProgConfig)
-cmdArgParser = liftA2 (,) rcnn prog
-  where
-    floatList = eitherReader $ parseOnly (list rational<* endOfInput) . T.pack
-    intList   = eitherReader $ parseOnly (list decimal <* endOfInput) . T.pack
+data ExtraArgs = TrainArgs
+    { pg_train_epochs         :: Int
+    , pg_train_iter_per_epoch :: Int
+    }
+    | NoExtraArgs
+    deriving Show
 
-    rcnn = RcnnConfiguration
-           <$> option intList   (long "rpn-anchor-scales" <> metavar "SCALES"
-                                                          <> showDefault
-                                                          <> value [8,16,32]
-                                                          <> help "rpn anchor scales")
-           <*> option floatList (long "rpn-anchor-ratios" <> metavar "RATIOS"
-                                                          <> showDefault
-                                                          <> value [0.5,1,2]
-                                                          <> help "rpn anchor ratios")
-           <*> option auto      (long "rpn-anchor-bsize"  <> metavar "BSIZE"
-                                                          <> showDefault
-                                                          <> value 16
-                                                          <> help "rpn anchor base size")
-           <*> option auto      (long "rpn-batch-rois"    <> metavar "BATCH-ROIS"
-                                                          <> showDefault
-                                                          <> value 256
-                                                          <> help "rpn number of rois per batch")
-           <*> option auto      (long "rpn-pre-nms-topk"  <> metavar "PRE-NMS-TOPK"
-                                                          <> showDefault
-                                                          <> value 12000
-                                                          <> help "rpn nms pre-top-k")
-           <*> option auto      (long "rpn-post-nms-topk" <> metavar "POST-NMS-TOPK"
-                                                          <> showDefault
-                                                          <> value 2000
-                                                          <> help "rpn nms post-top-k")
-           <*> option auto      (long "rpn-nms-thresh"    <> metavar "NMS-THRESH"
-                                                          <> showDefault
-                                                          <> value 0.7
-                                                          <> help "rpn nms threshold")
-           <*> option auto      (long "rpn-min-size"      <> metavar "MIN-SIZE"
-                                                          <> showDefault
-                                                          <> value 16
-                                                          <> help "rpn min size")
-           <*> option auto      (long "rpn-fg-fraction"   <> metavar "FG-FRACTION"
-                                                          <> showDefault
-                                                          <> value 0.5
-                                                          <> help "rpn foreground fraction")
-           <*> option auto      (long "rpn-fg-overlap"    <> metavar "FG-OVERLAP"
-                                                          <> showDefault
-                                                          <> value 0.7
-                                                          <> help "rpn foreground iou threshold")
-           <*> option auto      (long "rpn-bg-overlap"    <> metavar "BG-OVERLAP"
-                                                          <> showDefault
-                                                          <> value 0.3
-                                                          <> help "rpn background iou threshold")
-           <*> option auto      (long "rpn-allowed-border"<> metavar "ALLOWED-BORDER"
-                                                          <> showDefault
-                                                          <> value 0
-                                                          <> help "rpn allowed border")
-           <*> option auto      (long "rcnn-num-classes"  <> metavar "NUM-CLASSES"
-                                                          <> showDefault
-                                                          <> value 81
-                                                          <> help "rcnn number of classes")
-           <*> option auto      (long "rcnn-pooled-size"  <> metavar "POOLED-SIZE"
-                                                          <> showDefault
-                                                          <> value 14
-                                                          <> help "rcnn pooled size")
-           <*> option auto      (long "rcnn-batch-rois"   <> metavar "BATCH_ROIS"
-                                                          <> showDefault
-                                                          <> value 128
-                                                          <> help "rcnn batch rois")
-           <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"
-                                                          <> showDefault
-                                                          <> value 0.25
-                                                          <> help "rcnn foreground fraction")
-           <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"
-                                                          <> showDefault
-                                                          <> value 0.5
-                                                          <> help "rcnn foreground iou threshold")
-           <*> option auto      (long "rcnn-max-num-gt"   <> metavar "NUM-GT"
-                                                          <> showDefault
-                                                          <> value 100
-                                                          <> help "rcnn max number of gt")
-           <*> option intList   (long "strides"           <> metavar "STRIDE"
-                                                          <> showDefault
-                                                          <> value [16]
-                                                          <> help "feature stride")
-           <*> option auto      (long "batch-size"        <> metavar "BATCH-SIZE"
-                                                          <> showDefault
-                                                          <> value 1
-                                                          <> help "batch size")
-           <*> strOption        (long "pretrained"        <> metavar "PATH"
-                                                          <> value ""
-                                                          <> help "path to pretrained model")
-           <*> option auto      (long "backbone"          <> metavar "BACKBONE"
-                                                          <> value VGG16
-                                                          <> help "vgg-16 or resnet-50")
+apRcnn :: (Parser RcnnConfiguration, Parser RcnnConfiguration)
+apRcnn = (train, infr)
+    where
+        train = RcnnConfigurationTrain
+                <$> backbone
+                <*> batch_size
+                <*> feature_strides
+                <*> strOption        (long "pretrained"        <> metavar "PATH"
+                                                               <> value ""
+                                                               <> help "path to pretrained model")
+                <*> option floatx4   (long "bbox-reg-stds"     <> metavar "BBOX_STDS"
+                                                               <> value (0.1, 0.1, 0.2, 0.2))
+                <*> rpn_anchor_scales
+                <*> rpn_anchor_ratios
+                <*> rpn_base_size
+                <*> rpn_pre_topk
+                <*> rpn_post_topk
+                <*> rpn_nms_threshold
+                <*> rpn_min_size
+                <*> option auto      (long "rpn-batch-rois"    <> metavar "BATCH-ROIS"
+                                                               <> showDefault
+                                                               <> value 256
+                                                               <> help "rpn number of rois per batch")
+                <*> option auto      (long "rpn-fg-fraction"   <> metavar "FG-FRACTION"
+                                                               <> showDefault
+                                                               <> value 0.5
+                                                               <> help "rpn foreground fraction")
+                <*> option auto      (long "rpn-fg-overlap"    <> metavar "FG-OVERLAP"
+                                                               <> showDefault
+                                                               <> value 0.7
+                                                               <> help "rpn foreground iou threshold")
+                <*> option auto      (long "rpn-bg-overlap"    <> metavar "BG-OVERLAP"
+                                                               <> showDefault
+                                                               <> value 0.3
+                                                               <> help "rpn background iou threshold")
+                <*> option auto      (long "rpn-allowed-border"<> metavar "ALLOWED-BORDER"
+                                                               <> showDefault
+                                                               <> value 0
+                                                               <> help "rpn allowed border")
+                <*> rcnn_num_classes
+                <*> rcnn_pool_sized
+                <*> rcnn_batch_rois
+                <*> option auto      (long "rcnn-fg-fraction"  <> metavar "FG-FRACTION"
+                                                               <> showDefault
+                                                               <> value 0.25
+                                                               <> help "rcnn foreground fraction")
+                <*> option auto      (long "rcnn-fg-overlap"   <> metavar "FG-OVERLAP"
+                                                               <> showDefault
+                                                               <> value 0.5
+                                                               <> help "rcnn foreground iou threshold")
+                <*> option auto      (long "rcnn-max-num-gt"   <> metavar "NUM-GT"
+                                                               <> showDefault
+                                                               <> value 100
+                                                               <> help "rcnn max number of gt")
 
-    prog = ProgConfig
-           <$> strOption        (long "base"              <> metavar "PATH"
-                                                          <> help "path to the dataset")
-           <*> option auto      (long "img-size"          <> metavar "SIZE"
-                                                          <> showDefault
-                                                          <> value 1024
-                                                          <> help "long side of image")
-           <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN"
-                                                          <> showDefault
-                                                          <> value [0,0,0]
-                                                          <> help "RGB mean of images")
-           <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS"
-                                                          <> showDefault
-                                                          <> value [1,1,1]
-                                                          <> help "RGB std-dev of images")
-           <*> option auto      (long "train-epochs"      <> metavar "EPOCHS"
-                                                          <> value 500
-                                                          <> help "number of epochs to train")
-           <*> option auto      (long "train-iter-per-epoch" <> metavar "ITER-PER-EPOCH"
-                                                          <> value 100
-                                                          <> help "number of iter per epoch")
-           <*> switch           (long "inference"         <> showDefault
-                                                          <> help "do inference")
-           <*> option auto      (long "inference-img-id"  <> value 0
-                                                          <> help "image id")
+        infr = RcnnConfigurationInference
+                <$> backbone
+                <*> batch_size
+                <*> feature_strides
+                <*> strOption       (long "checkpoint" <> metavar "PATH"
+                                                       <> value ""
+                                                       <> help "path to a saved model")
+                <*> option floatx4  (long "bbox-reg-stds" <> metavar "BBOX_STDS" <> value (0.1, 0.1, 0.2, 0.2))
+                <*> rpn_anchor_scales
+                <*> rpn_anchor_ratios
+                <*> rpn_base_size
+                <*> rpn_pre_topk
+                <*> rpn_post_topk
+                <*> rpn_nms_threshold
+                <*> rpn_min_size
+                <*> rcnn_num_classes
+                <*> rcnn_pool_sized
+                <*> rcnn_batch_rois
+                <*> option auto     (long "rcnn-force-nms" <> metavar "FORCE_NMS" <> value False)
+                <*> option auto     (long "rcnn-nms-threshold" <> metavar "NMS_THRESH" <> value 0.5)
+                <*> option auto     (long "rcnn-nms-topk" <> metavar "NMS_TOPK" <> value (-1))
 
+
+        rpn_anchor_scales = option intList   (long "rpn-anchor-scales" <> metavar "SCALES"
+                                                              <> showDefault
+                                                              <> value [8,16,32]
+                                                              <> help "rpn anchor scales")
+        rpn_anchor_ratios = option floatList (long "rpn-anchor-ratios" <> metavar "RATIOS"
+                                                              <> showDefault
+                                                              <> value [0.5,1,2]
+                                                              <> help "rpn anchor ratios")
+        rpn_base_size     = option auto      (long "rpn-anchor-bsize"  <> metavar "BSIZE"
+                                                              <> showDefault
+                                                              <> value 16
+                                                              <> help "rpn anchor base size")
+        rpn_pre_topk      = option auto      (long "rpn-pre-nms-topk"  <> metavar "PRE-NMS-TOPK"
+                                                              <> showDefault
+                                                              <> value 12000
+                                                              <> help "rpn nms pre-top-k")
+        rpn_post_topk     = option auto      (long "rpn-post-nms-topk" <> metavar "POST-NMS-TOPK"
+                                                              <> showDefault
+                                                              <> value 2000
+                                                              <> help "rpn nms post-top-k")
+        rpn_nms_threshold = option auto      (long "rpn-nms-thresh" <> metavar "NMS-THRESH"
+                                                              <> showDefault
+                                                              <> value 0.7
+                                                              <> help "rpn nms threshold")
+        rpn_min_size      = option auto      (long "rpn-min-size" <> metavar "MIN-SIZE"
+                                                               <> showDefault
+                                                               <> value 16
+                                                               <> help "rpn min size")
+        rcnn_num_classes  = option auto      (long "rcnn-num-classes"  <> metavar "NUM-CLASSES"
+                                                              <> showDefault
+                                                              <> value 81
+                                                              <> help "rcnn number of classes")
+        rcnn_batch_rois   = option auto      (long "rcnn-batch-rois"   <> metavar "BATCH_ROIS"
+                                                              <> showDefault
+                                                              <> value 128
+                                                              <> help "rcnn batch rois")
+        rcnn_pool_sized   = option auto      (long "rcnn-pooled-size"  <> metavar "POOLED-SIZE"
+                                                              <> showDefault
+                                                              <> value 14
+                                                              <> help "rcnn pooled size")
+        feature_strides   = option intList   (long "strides"  <> metavar "STRIDE"
+                                                              <> showDefault
+                                                              <> value [16]
+                                                              <> help "feature stride")
+        batch_size        = option auto      (long "batch-size" <> metavar "BATCH-SIZE"
+                                                              <> showDefault
+                                                              <> value 1
+                                                              <> help "batch size")
+        backbone          = option auto      (long "backbone" <> metavar "BACKBONE"
+                                                              <> value VGG16
+                                                              <> help "vgg-16 or resnet-50")
+
+apCommon :: Parser CommonArgs
+apCommon = CommonArgs
+       <$> strOption        (long "base"              <> metavar "PATH"
+                                                      <> help "path to the dataset")
+       <*> option auto      (long "img-size"          <> metavar "SIZE"
+                                                      <> showDefault
+                                                      <> value 1024
+                                                      <> help "long side of image")
+       <*> option floatList (long "img-pixel-means"   <> metavar "RGB-MEAN"
+                                                      <> showDefault
+                                                      <> value [0,0,0]
+                                                      <> help "RGB mean of images")
+       <*> option floatList (long "img-pixel-stds"    <> metavar "RGB-STDS"
+                                                      <> showDefault
+                                                      <> value [1,1,1]
+                                                      <> help "RGB std-dev of images")
+
+apTrain :: Parser ExtraArgs
+apTrain = TrainArgs
+       <$> option auto      (long "train-epochs"      <> metavar "EPOCHS"
+                                                      <> value 500
+                                                      <> help "number of epochs to train")
+       <*> option auto      (long "train-iter-per-epoch" <> metavar "ITER-PER-EPOCH"
+                                                      <> value 100
+                                                      <> help "number of iter per epoch")
+
+floatList :: ReadM [Float]
+floatList = eitherReader $ parseOnly (list rational<* endOfInput) . T.pack
+
+floatx4 :: ReadM (Float, Float, Float, Float)
+floatx4 = let p = do fs <- list rational
+                     case fs of
+                       [a, b, c, d] -> return (a, b, c, d)
+                       _            -> fail "should be exactly 4 floats"
+           in eitherReader $ parseOnly (p <* endOfInput) . T.pack
+
+intList :: ReadM [Int]
+intList   = eitherReader $ parseOnly (list decimal <* endOfInput) . T.pack
 
 toTriple [a, b, c] = (a, b, c)
 toTriple x         = error (show x)
@@ -201,7 +251,7 @@ default_initializer name = case name of
       | T.isSuffixOf ".gamma"        name -> I.ones  name
       | otherwise -> I.zeros name
 
-loadWeights :: (MonadIO m, MonadReader env m, HasLogFunc env, HasCallStack)
+loadWeights :: (DType a, MonadIO m, MonadReader env m, HasLogFunc env, HasCallStack)
             => String -> Module t a m ()
 loadWeights weights_path = do
     weights_path <- liftIO $ canonicalizePath weights_path
@@ -313,7 +363,7 @@ withRpnTargets :: MonadIO m
                => RcnnConfiguration
                -> (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)
                -> m (String, [NDArray Float])
-withRpnTargets RcnnConfiguration{..} dat = liftIO $ do
+withRpnTargets RcnnConfigurationTrain{..} dat = liftIO $ do
     (cls_targets, box_targets, box_weights) <-
         generateTargets extract info (RNE.fromList feature_strides) conf (V.toList gt)
     imgA  <- fromRepa img
@@ -346,6 +396,15 @@ withRpnTargets'Mask conf dat = do
         msksA <- stack 0 . V.toList =<< mapM fromRepa msks
         msksA <- divScalar 255 =<< cast #float32 msksA :: IO (NDArray Float)
         return (filename, msksA : ret)
+
+toListNDArray :: MonadIO m
+               => (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)
+               -> m (String, [NDArray Float])
+toListNDArray (filename, img, info, gt) = liftIO $ do
+    imgA  <- fromRepa img
+    infoA <- fromRepa info
+    gtA   <- stack 0 . V.toList =<< mapM fromRepa gt
+    return (filename, [gtA, imgA, infoA])
 
 concatBatch :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch batch = liftIO $ do

@@ -2,19 +2,20 @@
 {-# LANGUAGE RecordWildCards #-}
 module Main where
 
-import           Control.Lens                      (use, (.=))
-import           Data.Array.Repa                   ((:.) (..), Array, DIM1,
-                                                    DIM2, DIM3, U, Z (..))
+import           Codec.Picture                     (PixelRGBA8 (..), writePng)
+import           Control.Lens                      (ix, use, (.=), (^?!))
+import           Data.Array.Repa                   (Array, DIM1, DIM2, DIM3,
+                                                    DIM4, U)
 import qualified Data.Array.Repa                   as Repa
 import           Data.Conduit                      ((.|))
 import qualified Data.Conduit.List                 as C
-import qualified Data.Vector.Algorithms.Intro      as VA
-import qualified Data.Vector.Mutable               as VM
+import           Data.Random.Source.StdGen         (mkStdGen)
 import           Formatting                        (fixed, formatToString, int,
                                                     left, sformat, stext,
                                                     string, (%))
-import           Options.Applicative               (execParser, fullDesc,
-                                                    header, helper, info,
+import           Options.Applicative               (command, execParser,
+                                                    fullDesc, header, helper,
+                                                    hsubparser, info, progDesc,
                                                     (<**>))
 import           RIO                               hiding (Const)
 import           RIO.Char                          (isDigit)
@@ -23,20 +24,17 @@ import qualified RIO.HashMap                       as M
 import qualified RIO.HashSet                       as S
 import           RIO.List                          (sort)
 import qualified RIO.Text                          as T
+import qualified RIO.Vector.Boxed                  as VB
 import qualified RIO.Vector.Storable               as VS
-import qualified RIO.Vector.Unboxed                as VU
-import qualified RIO.Vector.Unboxed.Partial        as VU ((//))
-import qualified Text.PrettyPrint.Leijen.Text      as PP
 
 import           MXNet.Base
 import qualified MXNet.Base.ParserUtils            as P
-import           MXNet.Coco.Types                  (images, img_id)
 import           MXNet.NN
 import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
 import           MXNet.NN.DataIter.Conduit
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
-import           MXNet.NN.ModelZoo.Utils.Box
+import           MXNet.NN.Utils.Render
 
 import           RCNN
 
@@ -46,136 +44,59 @@ main = do
     _    <- mxListAllOpNames
     registerCustomOperator ("anchor_generator", Anchor.buildAnchorGenerator)
 
-    (rcnn_conf, pg_conf@ProgConfig{..}) <- execParser $ info (cmdArgParser <**> helper) (fullDesc <> header "Faster-RCNN")
-    if pg_infer then
-        -- mainInfer rcnn_conf pg_conf
-        error "cannot infer"
-    else
-        mainTrain rcnn_conf pg_conf
+    let (apRcnnT, apRcnnI) = apRcnn
+        apT = liftA3 (,,) apRcnnT apCommon apTrain
+        apI = liftA3 (,,) apRcnnI apCommon (pure NoExtraArgs)
+        whole = hsubparser
+                ( command "train"     (info apT (progDesc "Train"))
+               <> command "inference" (info apI (progDesc "Run inference"))
+                )
+    args <- execParser $ info (whole <**> helper) (fullDesc <> header "Faster-RCNN")
+    case args of
+      (RcnnConfigurationTrain{}, _, _)     -> mainTrain args
+      (RcnnConfigurationInference{}, _, _) -> mainInfer args
     mxNotifyShutdown
 
---mainInfer rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
---    sym <- runLayerBuilder $ symbolInfer rcnn_conf
---    fixed_params <- fixedParams backbone INFERENCE sym
---    fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
 --
---    coco_inst@(Coco.Coco _ _ coco_inst_ _) <- Coco.coco ds_base_path "val2017"
---    sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
---                _cfg_data  = M.fromList [("data",    (STensor [batch_size, 3, ds_img_size, ds_img_size])),
---                ("im_info", (STensor [batch_size, 3]))],
---                _cfg_label = [],
---                _cfg_initializers = M.empty,
---                _cfg_default_initializer = default_initializer,
---                _cfg_fixed_params = fixed_params,
---                _cfg_context = contextGPU0
---            })
---    let vimg = V.filter (\img -> img ^. img_id == pg_infer_image_id) $ coco_inst_ ^. images
---        img = V.head vimg
+-- data AccDbg a = AccDbg (Accuracy a)
 --
---    when (V.null vimg) (throwString $ "image_id " ++ show pg_infer_image_id ++ " not found in val2017")
+-- instance EvalMetricMethod AccDbg where
+--     data MetricData AccDbg a = AccDbgPriv (MetricData Accuracy a)
+--     newMetric phase (AccDbg conf) = do
+--         priv <- newMetric phase conf
+--         return $ AccDbgPriv priv
+--     evalMetric (AccDbgPriv accpriv) bindings outputs = do
+--         liftIO $ do
+--             let AccuracyPriv acc _ _ _ = accpriv
+--             lbl <- toCPU $ _mtr_acc_get_gt acc bindings outputs
+--             -- x <- toCPU $ outputs ^?! ix 6
+--             traceShowM =<< toVector lbl
+--             -- traceShowM . VS.take 20 =<< toVector x
+--         ret <- evalMetric accpriv bindings outputs
+--         return ret
+--     formatMetric (AccDbgPriv acc) = formatMetric acc
 --
---    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
---    runApp coco_conf $ withSession sess $ do
---        (img_tensor_r, img_info_r) <- Coco.loadImage img
---        img_tensor <- liftIO $ repaToNDArray img_tensor_r
---        img_info   <- liftIO $ repaToNDArray img_info_r
---        img_tensor <- liftIO $ expandDims 0 img_tensor
---        img_info   <- liftIO $ expandDims 0 img_info
 --
---        checkpoint <- lastSavedState "checkpoints" "faster_rcnn"
---        case checkpoint of
---            Nothing -> do
---                throwString $ "Checkpoint not found."
---            Just filename -> do
---                loadState filename []
---                let binding = M.fromList [ ("data",    img_tensor)
---                                         , ("im_info", img_info)]
---                [rois, cls_prob, bbox_pred] <- forwardOnly binding
---                liftIO $ do
---                    rois     <- toRepa @DIM2 rois       -- [NUM_ROIS, 5]
---                    cls_prob <- toRepa @DIM2 cls_prob   -- [NUM_ROIS, NUM_CLASSES]
---                    deltas   <- toRepa @DIM2 bbox_pred  -- [NUM_ROIS, NUM_CLASSES*4]
+-- data Dbg a = Dbg (M.HashMap Text (NDArray a) -> [NDArray a] -> NDArray a)
 --
---                    let box_stds = Repa.fromListUnboxed (Z :. 4 :: DIM1) [0.1, 0.1, 0.2, 0.2]
---                        rois' = Repa.computeS $ Repa.traverse rois
---                                    (\(Z :. n :. 5) -> Z :. n :. 4)
---                                    (\lk (Z:.i:.j) -> lk (Z:.i:.(j+1)))
---                        deltas' = reshapeEx (Z :. 0 :. (-1) :. 4 :: DIM3) deltas
---                        pred_boxes = decodeBoxes rois' deltas' box_stds img_info_r
---                        (cls_ids, cls_scores) = decodeScores cls_prob 1e-3
---                        res = cls_ids Repa.++ cls_scores Repa.++ pred_boxes
---                        -- exlcude background class 0
---                        -- and transpose from [NUM_ROIS, NUM_CLASSES_FG, 6] to [NUM_CLASSES_FG, NUM_ROIS, 6]
---                        res_no_bg = Repa.traverse res
---                                        (\(Z:.i:.j:.k) -> Z:.(j-1):.i:.k)
---                                        (\lk (Z:.j:.i:.k) -> lk (Z:.i:.(j+1):.k))
---
---                        -- nms the boxes
---                        res_out = V.concatMap (nmsBoxes 0.3) $ vunstack $
---                                        Repa.computeS res_no_bg
---
---                        -- keep only those with confidence >= 0.7
---                        res_good = V.filter ((>= 0.7) . (^#! 1)) $ res_out
---                    PP.putDoc . PP.pretty $ V.toList $ V.map PrettyArray res_good
---                -- logInfo . display $ length res_good
---                -- putStrLn $ prettyShow $ V.toList $ V.concatMap vunstack a
---                -- putDoc . pretty $ V.toList $ vunstack cls_prob
---                logInfo . display $ sformat ("Done: " % int) (img ^. img_id)
---
---  where
---    decodeBoxes rois deltas box_stds im_info =
---        -- rois: [N, 4]
---        -- deltas: [N, NUM_CLASSES, 4]
---        -- box_stds: [4]
---        -- return: [N, NUM_CLASSES, 4]
---        let [height, width, scale] = Repa.toList im_info :: [Float]
---            shape = Repa.extent deltas
---            eachClass roi = (Repa.computeS . Repa.map (/ scale)) . bboxClip height width . bboxTransInv box_stds roi
---            eachROI roi = V.map (eachClass roi) . vunstack
---            pred_boxes = V.zipWith eachROI (vunstack rois) (vunstack deltas)
---        in Repa.computeUnboxedS $ Repa.reshape shape $ vstack $ V.concat $ V.toList pred_boxes
---
---    decodeScores :: Array U DIM2 Float -> Float -> (Array U DIM3 Float, Array U DIM3 Float)
---    decodeScores cls_prob thr =
---        let Z:.num_rois:.num_classes = Repa.extent cls_prob
---            cls_id = Repa.fromUnboxed (Z:.1:.num_classes) $ VU.enumFromN 0 num_classes
---            -- cls_ids :: [NUM_ROIS, NUM_CLASSES]
---            cls_ids = vstack $ V.replicate num_rois cls_id
---            -- cls_scores :: [NUM_ROIS, NUM_CLASSES]
---            cls_ids_masked = Repa.computeS $ Repa.zipWith (\v1 v2 -> if v2 >= thr then v1 else (-1)) cls_ids cls_prob
---            cls_scs_masked = Repa.computeS $ Repa.map (\v -> if v >= thr then v else 0) cls_prob
---        in (reshapeEx (Z:.0:.0:.1) cls_ids_masked, reshapeEx (Z:.0:.0:.1) cls_scs_masked)
---
---    nmsBoxes :: Float -> Array U DIM2 Float -> V.Vector (Array U DIM1 Float)
---    nmsBoxes threshold boxes = runST $ do
---        items <- V.thaw (vunstack boxes)
---        go items
---        V.filter ((/= -1) . (^#! 0)) <$> V.freeze items
---      where
---        cmp a b | a ^#! 0 == -1 = GT
---                | b ^#! 0 == -1 = LT
---                | otherwise = compare (b ^#! 1) (a ^#! 1)
---        go :: VM.MVector s (Array U DIM1 Float) -> ST s ()
---        go items =
---            when (VM.length items > 0) $ do
---                VA.sortBy cmp items
---                box0 <- VM.read items 0
---                when (box0 ^#! 0 == -1) $ do
---                    items <- return $ VM.tail items
---                    V.forM_ (V.enumFromN 0 (VM.length items)) $ \k -> do
---                        boxK <- VM.read items k
---                        let b1 = Repa.computeS $ Repa.extract (Z:.2) (Z:.4) box0
---                            b2 = Repa.computeS $ Repa.extract (Z:.2) (Z:.4) boxK
---                        when (bboxIOU b1 b2 >= threshold) $ do
---                            let boxK' = Repa.fromUnboxed (Z:.6 :: DIM1) $ Repa.toUnboxed boxK VU.// [(0, -1)]
---                            VM.write items k boxK'
---                    go items
+-- instance EvalMetricMethod Dbg where
+--     data MetricData Dbg a = DbgPriv (Dbg a)
+--     newMetric phase a = return (DbgPriv a)
+--     evalMetric (DbgPriv (Dbg __get)) bindings outputs = liftIO $ do
+--         array <- toCPU $ __get bindings outputs
+--         shp <- ndshape array
+--         val <- toVector array
+--         traceShowM (shp, val)
+--         return M.empty
+--     formatMetric _ = return "<DBG>"
 
-mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
-    sym  <- runLayerBuilder $ graphTrain rcnn_conf
+
+mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) = do
+    (_, sym)  <- runLayerBuilder $ graphT rcnn_conf
     fixed_params <- fixedParams backbone TRAIN sym
 
     coco_inst <- Coco.coco ds_base_path "train2017"
+    rand_gen <- newIORef $ mkStdGen 19
 
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
         -- There is a serious problem with asyncConduit. It made the training loop running
@@ -185,7 +106,8 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
         -- data_iter = asyncConduit (Just batch_size) $
         --
         data_iter = ConduitData (Just batch_size) $
-                    Coco.cocoImagesBBoxes True        .|
+                    Coco.cocoImagesBBoxes rand_gen           .|
+                    C.mapM (Coco.augmentWithBBoxes rand_gen) .|
                     C.mapM (withRpnTargets rcnn_conf) .|
                     C.chunksOf batch_size             .|
                     C.mapM concatBatch
@@ -198,8 +120,6 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 _cfg_label = ["rpn_cls_targets"
                              ,"rpn_box_targets"
                              ,"rpn_box_masks"
-                             ,"box_reg_mean"
-                             ,"box_reg_std"
                              ],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -207,10 +127,7 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 _cfg_context = contextGPU0
             })
 
-    mean <- fromVector [4] [0,0,0,0]
-    std  <- fromVector [4] [0.1, 0.1, 0.2, 0.2]
-
-    let lr_sched = lrOfFactor (#base := 0.004 .& #factor := 0.5 .& #step := 2000 .& Nil)
+    let lr_sched = lrOfFactor (#base := 0.001 .& #factor := 0.5 .& #step := 5000 .& Nil)
     -- optimizer <- makeOptimizer SGD'Mom lr_sched (#momentum := 0.9
     --                                           .& #wd := 0.0001
     --                                           .& #rescale_grad := 1 / (fromIntegral batch_size)
@@ -233,16 +150,27 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 let (base, _) = splitExtension filename
                     fn_rev = T.reverse $ T.pack base
                     epoch = P.parseR (P.takeWhile isDigit <* P.takeText) fn_rev
-                    epoch_next = P.parseR P.decimal $ T.reverse epoch
+                    epoch_next = (P.parseR P.decimal $ T.reverse epoch) + 1
                 return epoch_next
         logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-        metric <- newMetric "train" (RPNAccMetric "rpn_cls_targets" :*
-                                     RCNNAccMetric :*
-                                     RPNLogLossMetric "rpn_cls_targets" :*
-                                     RCNNLogLossMetric :*
-                                     RPNL1LossMetric :*
-                                     RCNNL1LossMetric :* MNil)
+        metric <- newMetric "train" (Accuracy "RPN" (PredByThreshold 0.5) 0
+                                        (\_ preds -> preds ^?! ix 0)
+                                        (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
+                                  :* Accuracy "RCNN" PredByArgmax 1
+                                        (\_ preds -> preds ^?! ix 3)
+                                        (\_ preds -> preds ^?! ix 5)
+                                  :* CrossEntropy "RPN" False
+                                        (\_ preds -> preds ^?! ix 0)
+                                        (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
+                                  :* CrossEntropy "RCNN" True
+                                        (\_ preds -> preds ^?! ix 3)
+                                        (\_ preds -> preds ^?! ix 5)
+                                  :* Norm "RPN" 1
+                                        (\_ preds -> preds ^?! ix 2)
+                                  :* Norm "RCNN" 1
+                                        (\_ preds -> preds ^?! ix 4)
+                                  :* MNil)
 
         -- update the internal counting of the iterations
         -- the lr is updated as per to it
@@ -259,65 +187,85 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                                          , ("rpn_cls_targets", y0)
                                          , ("rpn_box_targets", y1)
                                          , ("rpn_box_masks",   y2)
-                                         , ("box_reg_mean",    mean)
-                                         , ("box_reg_std",     std)
                                          ]
                 fitAndEval optimizer binding metric
                 eval <- formatMetric metric
                 lr <- use (untag . mod_statistics . stat_last_lr)
 
-                ------------------------------------------------------
-                -- code for debugging
-                ------------------------------------------------------
-                -- logInfo $ display $ tshow fn
-                -- exec <- use (untag . mod_executor)
-                -- liftIO $ do
-                --     let dir = "dumps"
-                --         file = sformat ("dumps/" % int % ".params") i
-                --     ex <- doesPathExist dir
-                --     when (not ex) (createDirectory dir)
-                --     outs  <- execGetOutputs exec
-                --     let names = ["data", "im_info", "gt_boxes",
-                --                  "rpn_cls_prob", "rpn_cls_loss",
-                --                  "rpn_bbox_loss", "cls_prob",
-                --                  "bbox_loss", "cls_targets",
-                --                  "aa", "pp", "rs", "rr"]
-                --     mxNDArraySave file $ zip names $ map unNDArray $ [x0, x1, x2] ++ outs
-
-                -- params <- use (untag . mod_params)
-                -- let calcSize (ParameterV a) = ndsize a
-                --     calcSize (ParameterF a) = ndsize a
-                --     calcSize (ParameterA a) = ndsize a
-                --     calcSize (ParameterG a b) = liftM2 (+) (ndsize a) (ndsize b)
-                --     arrays (ParameterV a)   = ([a] :: [NDArray Float])
-                --     arrays (ParameterF a)   = [a]
-                --     arrays (ParameterA a)   = [a]
-                --     arrays (ParameterG a b) = [a, b]
-                -- let hasnan (ParameterV a)   = hasnan_ a
-                --     hasnan (ParameterF a)   = hasnan_ a
-                --     hasnan (ParameterA a)   = hasnan_ a
-                --     hasnan (ParameterG a b) = hasnan_ a
-                --     hasnan_ a = do
-                --         v <- toVector a
-                --         return $ isJust $ VS.findIndex isNaN v
-                --     gradn :: Parameter Float -> IO (Maybe Float)
-                --     gradn (ParameterG _ b) = do
-                --         v <- prim _norm (#data := b .& Nil)
-                --         v <- toVector v
-                --         return $ v VS.!? 0
-                --     gradn _                = return $ Nothing
-                -- pn <- liftIO $ mapM hasnan params
-                -- traceShowM $ M.keys $ M.filter id pn
-                -- gn <- liftIO $ mapM gradn params
-                -- let gn' = M.toList $ M.filter isJust gn
-                --     gn'' = sortBy (compare `on` snd) gn'
-                -- traceShowM gn''
-                -- arrs <- liftIO $ mapM calcSize params
-                -- size <- return $ sum arrs
-                -- traceShowM ("total params (#float)", size)
-
                 logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
             withSession sess $ saveState (ei == 1)
                 (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)
+
+
+mainInfer (rcnn_conf@RcnnConfigurationInference{..}, CommonArgs{..}, NoExtraArgs) = do
+    (_, sym)  <- runLayerBuilder $ graphI rcnn_conf
+    fixed_params <- fixedParams backbone INFERENCE sym
+    fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
+
+    coco_inst@(Coco.Coco _ _ coco_inst_ _) <- Coco.coco ds_base_path "val2017"
+    sess <- newMVar =<< initialize @"faster_rcnn" sym (Config {
+                _cfg_data  = M.fromList [("data",    (STensor [batch_size, 3, ds_img_size, ds_img_size])),
+                                         ("im_info", (STensor [batch_size, 3]))],
+                _cfg_label = [],
+                _cfg_initializers = M.empty,
+                _cfg_default_initializer = default_initializer,
+                _cfg_fixed_params = fixed_params,
+                _cfg_context = contextGPU0
+            })
+    rand_gen <- newIORef $ mkStdGen 24
+    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
+        data_iter = ConduitData (Just batch_size) (
+                        Coco.cocoImagesBBoxes rand_gen .|
+                        C.mapM toListNDArray           .|
+                        C.chunksOf batch_size          .|
+                        C.mapM concatBatch
+                    ) & takeD 5
+
+    runApp coco_conf $ withSession sess $ do
+        loadState checkpoint []
+        void $ forEachD_i data_iter $ \(i, (fn, [x0, x1, x2])) -> do
+            let bindings = M.fromList [ ("data",            x1)
+                                      , ("im_info",         x2)
+                                      ]
+            [cls_ids, scores, boxes] <- forwardOnly bindings
+
+            -- cls_ids: (B, num_fg_classes * rcnn_nms_topk, 1)
+            -- scores : (B, num_fg_classes * rcnn_nms_topk, 1)
+            -- boxes  : (B, num_fg_classes * rcnn_nms_topk, 4)
+
+            liftIO $ do
+                fn      <- pure $ VB.fromList fn
+                infos   <- vunstack <$> toRepa @DIM2 x2
+                -- gt_boxes<- vunstack <$> toRepa @DIM3 x0
+                cls_ids <- vunstack <$> toRepa @DIM3 cls_ids
+                scores  <- vunstack <$> toRepa @DIM3 scores
+                boxes   <- vunstack <$> toRepa @DIM3 boxes
+                mean    <- fromVector [3] (VS.fromList ds_img_pixel_means)
+                std     <- fromVector [3] (VS.fromList ds_img_pixel_stds)
+                images  <- transpose x1 [0, 2, 3, 1] >>=
+                           mulBroadcast std          >>=
+                           addBroadcast mean         >>=
+                           mulScalar 255
+                images  <- vunstack <$> toRepa @DIM4 images
+                forM_ (VB.zip6 fn images infos cls_ids scores boxes) renderImageBBoxes
+
+
+renderImageBBoxes :: (String, Array U DIM3 Float, Array U DIM1 Float, Array U DIM2 Float, Array U DIM2 Float, Array U DIM2 Float) -> IO ()
+renderImageBBoxes (filename, image, info, cls_ids, scores, boxes) = do
+    let [height, width, scale] = Repa.toUnboxed info
+        jp_image = imageFromRepa image
+    -- TODO scale the image and bboxes back to orignal size
+    width  <- pure $ floor width
+    height <- pure $ floor height
+    writePng filename $ render width height $ do
+        drawImage jp_image
+        let all_boxes  = vunstack boxes
+            all_scores = VB.convert $ Repa.toUnboxed scores
+            all_cls    = VB.convert $ Repa.toUnboxed cls_ids
+        forM_ (VB.zip3 all_cls all_scores all_boxes) $ \(cls, score, box) -> do
+            let [x, y, x', y'] = Repa.toUnboxed box
+            when (score >= 0.5) $ do
+                traceShowM (score, box)
+                drawBox (PixelRGBA8 255 0 0 255) 1.0 x y x' y' Nothing
 

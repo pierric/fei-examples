@@ -25,13 +25,7 @@ import           MXNet.NN
 import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
 import           MXNet.NN.DataIter.Conduit
-import           MXNet.NN.ModelZoo.RCNN.FasterRCNN (RCNNAccMetric (..),
-                                                    RCNNL1LossMetric (..),
-                                                    RCNNLogLossMetric (..),
-                                                    RPNAccMetric (..),
-                                                    RPNL1LossMetric (..),
-                                                    RPNLogLossMetric (..),
-                                                    RcnnConfiguration (..))
+import           MXNet.NN.ModelZoo.RCNN.FasterRCNN (RcnnConfiguration (..))
 import           MXNet.NN.ModelZoo.RCNN.MaskRCNN
 
 import           RCNN
@@ -118,12 +112,23 @@ mainTrain rcnn_conf@RcnnConfiguration{..} ProgConfig{..} = do
                 return epoch_next
         logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-        metric <- newMetric "train" (RPNAccMetric "rpn_cls_targets" :*
-                                     RCNNAccMetric :*
-                                     RPNLogLossMetric "rpn_cls_targets" :*
-                                     RCNNLogLossMetric :*
-                                     RPNL1LossMetric :*
-                                     RCNNL1LossMetric :* MNil)
+        metric <- newMetric "train" (Accuracy "RPN" (PredByThreshold 0.5) 0
+                                        (\_ preds -> preds ^?! ix 0)
+                                        (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
+                                  :* Accuracy "RCNN" PredByArgmax 1
+                                        (\_ preds -> preds ^?! ix 3)
+                                        (\_ preds -> preds ^?! ix 5)
+                                  :* CrossEntropy "RPN" False
+                                        (\_ preds -> preds ^?! ix 0)
+                                        (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
+                                  :* CrossEntropy "RCNN" True
+                                        (\_ preds -> preds ^?! ix 3)
+                                        (\_ preds -> preds ^?! ix 5)
+                                  :* Norm "RPN" 1
+                                        (\_ preds -> preds ^?! ix 2)
+                                  :* Norm "RCNN" 1
+                                        (\_ preds -> preds ^?! ix 4)
+                                  :* MNil)
 
         -- update the internal counting of the iterations
         -- the lr is updated as per to it
