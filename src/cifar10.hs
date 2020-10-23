@@ -81,7 +81,7 @@ main = do
         ce  = CrossEntropy "out" True
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
-        acc = Accuracy "out" PredByArgmax
+        acc = Accuracy "out" PredByArgmax 0
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
     optimizer <- makeOptimizer SGD'Mom lr_scheduler Nil

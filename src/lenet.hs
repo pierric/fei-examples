@@ -56,7 +56,7 @@ main = do
 
         logInfo . display $ sformat "[Train] "
 
-        let acc_metric = Accuracy "ACC" PredByArgmax
+        let acc_metric = Accuracy "ACC" PredByArgmax 0
                             (\_ p -> p ^?! ix 0)
                             (\b _ -> b ^?! ix "y")
             ce_metric  = CrossEntropy "CE" True

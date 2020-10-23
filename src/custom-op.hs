@@ -1,5 +1,6 @@
 module Main where
 
+import           Control.Lens                (ix, (^?!))
 import           Formatting
 import           RIO                         hiding (Const)
 import qualified RIO.HashMap                 as M
@@ -18,7 +19,7 @@ import           MXNet.NN.DataIter.Streaming
 import qualified MXNet.NN.Initializer        as I
 import           MXNet.NN.Layer
 
-type ArrayF = NDArray Float
+batch_size  = 128
 
 data SoftmaxProp = SoftmaxProp
 
@@ -87,7 +88,7 @@ main = do
     net  <- runLayerBuilder symbol
 
     sess <- newMVar =<< initialize @"lenet" net (Config {
-                _cfg_data = M.singleton "x" (STensor [1,28,28]),
+                _cfg_data = M.singleton "x" (STensor [batch_size, 1,28,28]),
                 _cfg_label = ["y"],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -96,39 +97,36 @@ main = do
             })
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
+    let ce  = CrossEntropy "out" True
+                  (\_ p -> p ^?! ix 0)
+                  (\b _ -> b ^?! ix "y")
+        acc = Accuracy "out" PredByArgmax 0
+                  (\_ p -> p ^?! ix 0)
+                  (\b _ -> b ^?! ix "y")
+
     runSimpleApp $ do
 
         let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                    .& #label := "data/train-labels-idx1-ubyte"
-                                   .& #batch_size := 128 .& Nil)
+                                   .& #batch_size := batch_size .& Nil)
         let testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte"
                                    .& #label := "data/t10k-labels-idx1-ubyte"
                                    .& #batch_size := 16  .& Nil)
 
         total1 <- sizeD trainingData
         logInfo . display $ sformat "[Train] "
-        forM_ (V.enumFromTo 1 20) $ \ind -> do
+        forM_ (V.enumFromTo 1 10) $ \ind -> do
             logInfo . display $ sformat ("iteration " % int) ind
-            metric <- newMetric "train" (CrossEntropy "y" :* Accuracy "y" :* MNil)
+            metric <- newMetric "train" (ce :* acc :* MNil)
             void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
                 fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
                 eval <- formatMetric metric
-                logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int % ":" % stext) i total1 eval
+                when (i `mod` 100 == 1) $
+                    logInfo . display $ sformat (int % "/" % int % ":" % stext) i total1 eval
 
-        logInfo . display $ sformat "[Test] "
-
-        total2 <- sizeD testingData
-        result <- forEachD_i testingData $ \(i, (x, y)) -> withSession sess $ do
-            logInfo . display $ sformat ("\r\ESC[K" % int % "/" % int) i total2
-            ~[y'] <- forwardOnly (M.singleton "x" x)
-            ind1 <- liftIO $ toVector y
-            ind2 <- liftIO $ argmax y' (Just 1) False >>= toVector
-            return (ind1, ind2)
-
-        let (ls,ps) = unzip result
-            ls_unbatched = mconcat ls
-            ps_unbatched = mconcat ps
-            total_test_items = SV.length ls_unbatched
-            correct = SV.length $ SV.filter id $ SV.zipWith (==) ls_unbatched ps_unbatched
-        logInfo . display $ sformat ("Accuracy: " % int % "/" % int) correct total_test_items
-
+        metric <- newMetric "val" (acc :* MNil)
+        forEachD_i testingData $ \(i, (x, y)) -> withSession sess $ do
+            pred <- forwardOnly (M.singleton "x" x)
+            void $ evalMetric metric (M.singleton "y" y) pred
+        eval <- formatMetric metric
+        logInfo . display $ sformat ("Validation: " % stext) eval
