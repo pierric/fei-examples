@@ -30,6 +30,7 @@ common common-options
                       , fei-base
                       , fei-nn
                       , fei-modelzoo
+                      , resourcet
   default-extensions:   OverloadedLabels
                       , OverloadedStrings
                       , OverloadedLists
@@ -43,6 +44,7 @@ common common-options
 Executable lenet
   import:               common-options
   main-is:              lenet.hs
+  other-modules:        Common
   hs-source-dirs:       src
 
 Executable cifar10
