@@ -44,7 +44,6 @@ common common-options
 Executable lenet
   import:               common-options
   main-is:              lenet.hs
-  other-modules:        Common
   hs-source-dirs:       src
 
 Executable cifar10

@@ -80,21 +80,16 @@ default_initializer name shp
     | otherwise = I.normal 0.1 name shp
 
 main :: IO ()
-main = do
-    -- call mxListAllOpNames can ensure the MXNet itself is properly initialized
-    -- i.e. MXNet operators are registered in the NNVM
-    _    <- mxListAllOpNames
-    registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
+main = runFeiM () $ do
+    liftIO $ registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- runLayerBuilder symbol
-
-    sess <- newMVar =<< initialize @"lenet" net (Config {
-                _cfg_data = M.singleton "x" (STensor [batch_size, 1,28,28]),
-                _cfg_label = ["y"],
-                _cfg_initializers = M.empty,
-                _cfg_default_initializer = default_initializer,
-                _cfg_fixed_params = S.fromList [],
-                _cfg_context = contextGPU0
-            })
+    initSession @"lenet" net (Config {
+        _cfg_data = M.singleton "x" (STensor [batch_size, 1,28,28]),
+        _cfg_label = ["y"],
+        _cfg_initializers = M.empty,
+        _cfg_default_initializer = default_initializer,
+        _cfg_fixed_params = S.fromList [],
+        _cfg_context = contextGPU0 })
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
     let ce  = CrossEntropy "out" True
@@ -104,29 +99,27 @@ main = do
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
 
-    runSimpleApp $ do
+        trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
+                               .& #label := "data/train-labels-idx1-ubyte"
+                               .& #batch_size := batch_size .& Nil)
+        testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte"
+                               .& #label := "data/t10k-labels-idx1-ubyte"
+                               .& #batch_size := 16  .& Nil)
 
-        let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
-                                   .& #label := "data/train-labels-idx1-ubyte"
-                                   .& #batch_size := batch_size .& Nil)
-        let testingData  = mnistIter (#image := "data/t10k-images-idx3-ubyte"
-                                   .& #label := "data/t10k-labels-idx1-ubyte"
-                                   .& #batch_size := 16  .& Nil)
+    total <- sizeD trainingData
+    logInfo . display $ sformat "[Train] "
+    forM_ (V.enumFromTo 1 10) $ \ind -> do
+        logInfo . display $ sformat ("iteration " % int) ind
+        metric <- newMetric "train" (ce :* acc :* MNil)
+        void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
+            fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
+            eval <- formatMetric metric
+            when (i `mod` 100 == 1) $
+                logInfo . display $ sformat (int % "/" % int % ":" % stext) i total eval
 
-        total1 <- sizeD trainingData
-        logInfo . display $ sformat "[Train] "
-        forM_ (V.enumFromTo 1 10) $ \ind -> do
-            logInfo . display $ sformat ("iteration " % int) ind
-            metric <- newMetric "train" (ce :* acc :* MNil)
-            void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
-                fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
-                eval <- formatMetric metric
-                when (i `mod` 100 == 1) $
-                    logInfo . display $ sformat (int % "/" % int % ":" % stext) i total1 eval
-
-        metric <- newMetric "val" (acc :* MNil)
-        forEachD_i testingData $ \(i, (x, y)) -> withSession sess $ do
-            pred <- forwardOnly (M.singleton "x" x)
-            void $ evalMetric metric (M.singleton "y" y) pred
-        eval <- formatMetric metric
-        logInfo . display $ sformat ("Validation: " % stext) eval
+    metric <- newMetric "val" (acc :* MNil)
+    forEachD_i testingData $ \(i, (x, y)) -> askSession $ do
+        pred <- forwardOnly (M.singleton "x" x)
+        void $ evalMetric metric (M.singleton "y" y) pred
+    eval <- formatMetric metric
+    logInfo . display $ sformat ("Validation: " % stext) eval

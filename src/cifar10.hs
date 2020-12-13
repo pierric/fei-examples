@@ -1,8 +1,7 @@
 module Main where
 
 import           Control.Lens                (ix, use, (^?!))
-import           Formatting                  (float, formatToString, int, left,
-                                              sformat, stext, (%))
+import           Formatting                  (float, int, sformat, stext, (%))
 import           Options.Applicative
 import           RIO
 import qualified RIO.HashMap                 as M
@@ -11,10 +10,8 @@ import           RIO.List.Partial            (last)
 import qualified RIO.Text                    as T
 
 import           MXNet.Base                  (ArgOf (..), FShape (..),
-                                              HMap (..), NDArray (..),
-                                              contextCPU, contextGPU0,
-                                              listArguments, mxListAllOpNames,
-                                              (.&))
+                                              HMap (..), contextCPU,
+                                              contextGPU0, listArguments, (.&))
 import           MXNet.NN
 import           MXNet.NN.DataIter.Streaming
 import qualified MXNet.NN.Initializer        as I
@@ -43,16 +40,13 @@ default_initializer name shp
     | T.isSuffixOf ".running_var"  name = I.ones  name shp
     | otherwise = case shp of
                     [_,_] -> I.xavier 2.0 I.XavierGaussian I.XavierIn name shp
-                    _ -> I.normal 0.1 name shp
+                    _     -> I.normal 0.1 name shp
 
 main :: IO ()
-main = do
-    ProgArg model pretrained <- execParser $ info
+main = runFeiM () $ do
+    ProgArg model pretrained <- liftIO $ execParser $ info
         (cmdArgParser <**> helper) (fullDesc <> header "CIFAR-10 solver")
 
-    -- call mxListAllOpNames can ensure the MXNet itself is properly initialized
-    -- i.e. MXNet operators are registered in the NNVM
-    _    <- mxListAllOpNames
     net  <- runLayerBuilder $ do
                 dat <- variable "x"
                 lbl <- variable "y"
@@ -65,15 +59,13 @@ main = do
         Nothing -> return S.empty
         Just _  -> fixedParams net model
 
-    sess <- newMVar =<< initialize @"cifar10" net (Config {
-                _cfg_data = M.singleton "x" (STensor [batch_size, 3,32,32]),
-                _cfg_label = ["y"],
-                _cfg_initializers = M.empty,
-                _cfg_default_initializer = default_initializer,
-                _cfg_fixed_params = fixed,
-                _cfg_context = contextGPU0
-            })
-
+    initSession @"cifar10" net (Config {
+        _cfg_data = M.singleton "x" (STensor [batch_size, 3,32,32]),
+        _cfg_label = ["y"],
+        _cfg_initializers = M.empty,
+        _cfg_default_initializer = default_initializer,
+        _cfg_fixed_params = fixed,
+        _cfg_context = contextGPU0 })
 
     let lr_scheduler = lrOfMultifactor $ #steps := [100, 200, 300]
                                       .& #base := 0.0001
@@ -84,37 +76,36 @@ main = do
         acc = Accuracy "out" PredByArgmax 0
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
+
     optimizer <- makeOptimizer SGD'Mom lr_scheduler Nil
 
-    runSimpleApp $ do
+    let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
+                                     .& #data_shape  := [3,32,32]
+                                     .& #batch_size  := batch_size .& Nil)
+        valData      = imageRecordIter (#path_imgrec := "data/cifar10_val.rec"
+                                     .& #data_shape  := [3,32,32]
+                                     .& #batch_size  := 16 .& Nil)
+    askSession $ case pretrained of
+        Just path -> loadState path ["output.weight", "output.bias"]
+        Nothing   -> return ()
 
-        let trainingData = imageRecordIter (#path_imgrec := "data/cifar10_train.rec"
-                                         .& #data_shape  := [3,32,32]
-                                         .& #batch_size  := batch_size .& Nil)
-            valData      = imageRecordIter (#path_imgrec := "data/cifar10_val.rec"
-                                         .& #data_shape  := [3,32,32]
-                                         .& #batch_size  := 16 .& Nil)
-        withSession sess $ case pretrained of
-            Just path -> loadState path ["output.weight", "output.bias"]
-            Nothing   -> return ()
-
-        forM_ ([1..20] :: [Int]) $ \ ei -> do
-            logInfo . display $ sformat ("Epoch " % int) ei
-            metric <- newMetric "train" (ce :* acc :* MNil)
-            void $ forEachD_i trainingData $ \(i, (x, y)) -> withSession sess $ do
-                let binding = M.fromList [("x", x), ("y", y)]
-                fitAndEval optimizer binding metric
-                eval <- formatMetric metric
-                lr <- use (untag . mod_statistics . stat_last_lr)
-                when (i `mod` 20 == 0) $ do
-                    logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
-
-            metric <- newMetric "val" (acc :* MNil)
-            void $ forEachD_i valData $ \(i, (x, y)) -> withSession sess $ do
-                pred <- forwardOnly (M.singleton "x" x)
-                void $ evalMetric metric (M.singleton "y" y) pred
+    forM_ ([1..20] :: [Int]) $ \ ei -> do
+        logInfo . display $ sformat ("Epoch " % int) ei
+        metric <- newMetric "train" (ce :* acc :* MNil)
+        void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
+            let binding = M.fromList [("x", x), ("y", y)]
+            fitAndEval optimizer binding metric
             eval <- formatMetric metric
-            logInfo . display $ sformat ("Validation: " % stext) eval
+            lr <- use (untag . mod_statistics . stat_last_lr)
+            when (i `mod` 20 == 0) $ do
+                logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
+
+        metric <- newMetric "val" (acc :* MNil)
+        void $ forEachD_i valData $ \(_, (x, y)) -> askSession $ do
+            pred <- forwardOnly (M.singleton "x" x)
+            void $ evalMetric metric (M.singleton "y" y) pred
+        eval <- formatMetric metric
+        logInfo . display $ sformat ("Validation: " % stext) eval
 
 fixedParams symbol _ = do
     argnames <- listArguments symbol

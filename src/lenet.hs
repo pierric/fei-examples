@@ -7,7 +7,6 @@ import qualified RIO.HashMap               as M
 import qualified RIO.HashSet               as S
 import qualified RIO.Vector.Boxed          as V
 
-import           Common
 import           MXNet.Base
 import           MXNet.NN
 import           MXNet.NN.DataIter.Conduit
@@ -28,7 +27,7 @@ default_initializer name shp =
 
 main :: IO ()
 main = runFeiM () $ do
-    net  <- liftIO $ runLayerBuilder Model.symbol
+    net  <- runLayerBuilder Model.symbol
     initSession @"lenet" net (Config {
         _cfg_data = M.singleton "x" (STensor [batch_size, 1, 28, 28]),
         _cfg_label = ["y"],
@@ -36,7 +35,7 @@ main = runFeiM () $ do
         _cfg_default_initializer = default_initializer,
         _cfg_fixed_params = S.fromList [],
         _cfg_context = contextGPU0 })
-    optm <- liftIO $ makeOptimizer SGD'Mom (Const 0.0002) Nil
+    optm <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
     let trainingData = mnistIter (#image := "data/train-images-idx3-ubyte"
                                .& #label := "data/train-labels-idx1-ubyte"
