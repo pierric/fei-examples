@@ -26,7 +26,7 @@ default_initializer name shp =
         _ -> I.normal 0.1 name shp
 
 main :: IO ()
-main = runFeiM () $ do
+main = runFeiM'nept "jiasen/lenet" () $ do
     net  <- runLayerBuilder Model.symbol
     initSession @"lenet" net (Config {
         _cfg_data = M.singleton "x" (STensor [batch_size, 1, 28, 28]),
@@ -48,27 +48,33 @@ main = runFeiM () $ do
 
     logInfo . display $ sformat "[Train] "
 
-    let acc_metric = Accuracy "ACC" PredByArgmax 0
+    let acc_metric = Accuracy Nothing PredByArgmax 0
                         (\_ p -> p ^?! ix 0)
                         (\b _ -> b ^?! ix "y")
-        ce_metric  = CrossEntropy "CE" True
+        ce_metric  = CrossEntropy Nothing True
                         (\_ p -> p ^?! ix 0)
                         (\b _ -> b ^?! ix "y")
 
     forM_ (range 5) $ \ind -> do
         logInfo .display $ sformat ("iteration " % int) ind
-        metric <- newMetric "train" (ce_metric :* acc_metric :* MNil)
+        metrics <- newMetric "train" (ce_metric :* acc_metric :* MNil)
         void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
-            fitAndEval optm (M.fromList [("x", x), ("y", y)]) metric
-            eval <- formatMetric metric
-            when (i `mod` 100 == 0) $
+            fitAndEval optm (M.fromList [("x", x), ("y", y)]) metrics
+
+            kv <- metricsToList metrics
+            lift $ mapM_ (uncurry neptLog) kv
+
+            when (i `mod` 100 == 0) $ do
+                eval <- metricFormat metrics
                 logInfo . display $ sformat (int % "/" % int % " " % stext) i total eval
 
-        metric <- newMetric "val" acc_metric
-        forEachD_i testingData $ \(i, (x, y)) -> askSession $ do
+        metrics <- newMetric "val" (acc_metric :* MNil)
+        void $ forEachD_i testingData $ \(_, (x, y)) -> askSession $ do
             pred <- forwardOnly (M.singleton "x" x)
-            void $ evalMetric metric (M.singleton "y" y) pred
-            eval <- formatMetric metric
-            when (i `mod` 100 == 0) $
-                logInfo . display $ sformat (int % " " % stext) i eval
+            void $ metricUpdate metrics (M.singleton "y" y) pred
+
+        kv <- metricsToList metrics
+        mapM_ (uncurry neptLog) kv
+        eval <- metricFormat metrics
+        logInfo $ display eval
 
