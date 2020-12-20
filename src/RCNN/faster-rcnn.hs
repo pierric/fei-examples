@@ -39,14 +39,10 @@ import           MXNet.NN.Utils.Render
 
 import           RCNN
 
-instance Coco.HasDatasetConfig (FeiApp t n Coco.CocoConfig) where
-    type DatasetTag (FeiApp t n Coco.CocoConfig) = "coco"
-    datasetConfig = fa_extra
-
 main :: IO ()
 main = do
-    liftIO $ mxRandomSeed 8
-    liftIO $ registerCustomOperator ("anchor_generator", Anchor.buildAnchorGenerator)
+    mxRandomSeed 8
+    registerCustomOperator ("anchor_generator", Anchor.buildAnchorGenerator)
 
     let (apRcnnT, apRcnnI) = apRcnn
         apT = liftA3 (,,) apRcnnT apCommon apTrain
@@ -61,22 +57,22 @@ main = do
       (RcnnConfigurationInference{}, _, _) -> mainInfer args
 
 
-data Dbg e a = Dbg (e a)
-
-instance EvalMetricMethod e => EvalMetricMethod (Dbg e) where
-    data MetricData (Dbg e) a = DbgPriv (MetricData e a)
-    newMetric phase (Dbg conf) = do
-        p <- newMetric phase conf
-        return $ DbgPriv p
-    evalMetric (DbgPriv p) bindings outputs = do
-        liftIO $ do
-            a <- toCPU $ bindings ^?! ix "rpn_cls_targets"
-            a <- toVector =<< prim Ops._norm (#ord := 1 .& #data := a .& Nil)
-            b <- toCPU $ outputs ^?! ix 0
-            b <- toVector =<< prim Ops._norm (#ord := 1 .& #data := b .& Nil)
-            traceShowM (a, b)
-        evalMetric p bindings outputs
-    formatMetric (DbgPriv p) = formatMetric p
+-- data Dbg e a = Dbg (e a)
+--
+-- instance EvalMetricMethod e => EvalMetricMethod (Dbg e) where
+--     data MetricData (Dbg e) a = DbgPriv (MetricData e a)
+--     newMetric phase (Dbg conf) = do
+--         p <- newMetric phase conf
+--         return $ DbgPriv p
+--     evalMetric (DbgPriv p) bindings outputs = do
+--         liftIO $ do
+--             a <- toCPU $ bindings ^?! ix "rpn_cls_targets"
+--             a <- toVector =<< prim Ops._norm (#ord := 1 .& #data := a .& Nil)
+--             b <- toCPU $ outputs ^?! ix 0
+--             b <- toVector =<< prim Ops._norm (#ord := 1 .& #data := b .& Nil)
+--             traceShowM (a, b)
+--         evalMetric p bindings outputs
+--     formatMetric (DbgPriv p) = formatMetric p
 --
 -- data AccDbg a = AccDbg (Accuracy a)
 --
@@ -175,21 +171,21 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                  return epoch_next
         logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
-        metric <- newMetric "train" (Accuracy "RPN" (PredByThreshold 0.5) 0
+        metric <- newMetric "train" (Accuracy (Just "RPN-acc") (PredByThreshold 0.5) 0
                                         (\_ preds -> preds ^?! ix 0)
                                         (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
-                                  :* Accuracy "RCNN" PredByArgmax 1
+                                  :* Accuracy (Just "RCNN-acc") PredByArgmax 1
                                         (\_ preds -> preds ^?! ix 3)
                                         (\_ preds -> preds ^?! ix 5)
-                                  :* CrossEntropy "RPN" False
+                                  :* CrossEntropy (Just "RPN-ce") False
                                         (\_ preds -> preds ^?! ix 0)
                                         (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
-                                  :* CrossEntropy "RCNN" True
+                                  :* CrossEntropy (Just "RCNN-ce") True
                                         (\_ preds -> preds ^?! ix 3)
                                         (\_ preds -> preds ^?! ix 5)
-                                  :* Norm "RPN" 1
+                                  :* Norm (Just "RPN-L1") 1
                                         (\_ preds -> preds ^?! ix 2)
-                                  :* Norm "RCNN" 1
+                                  :* Norm (Just "RCNN-L1") 1
                                         (\_ preds -> preds ^?! ix 4)
                                   :* MNil)
 
@@ -210,7 +206,7 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                                           , ("rpn_box_masks",   y2)
                                           ]
                  fitAndEval optm binding metric
-                 eval <- formatMetric metric
+                 eval <- metricFormat metric
                  lr <- use (untag . mod_statistics . stat_last_lr)
 
                  logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr

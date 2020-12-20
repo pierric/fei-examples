@@ -70,10 +70,10 @@ main = runFeiM () $ do
     let lr_scheduler = lrOfMultifactor $ #steps := [100, 200, 300]
                                       .& #base := 0.0001
                                       .& #factor:= 0.75 .& Nil
-        ce  = CrossEntropy "out" True
+        ce  = CrossEntropy Nothing True
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
-        acc = Accuracy "out" PredByArgmax 0
+        acc = Accuracy Nothing PredByArgmax 0
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
 
@@ -95,7 +95,7 @@ main = runFeiM () $ do
         void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
             let binding = M.fromList [("x", x), ("y", y)]
             fitAndEval optimizer binding metric
-            eval <- formatMetric metric
+            eval <- metricFormat metric
             lr <- use (untag . mod_statistics . stat_last_lr)
             when (i `mod` 20 == 0) $ do
                 logInfo . display $ sformat (int % " " % stext % " LR: " % float) i eval lr
@@ -103,8 +103,8 @@ main = runFeiM () $ do
         metric <- newMetric "val" (acc :* MNil)
         void $ forEachD_i valData $ \(_, (x, y)) -> askSession $ do
             pred <- forwardOnly (M.singleton "x" x)
-            void $ evalMetric metric (M.singleton "y" y) pred
-        eval <- formatMetric metric
+            void $ metricUpdate metric (M.singleton "y" y) pred
+        eval <- metricFormat metric
         logInfo . display $ sformat ("Validation: " % stext) eval
 
 fixedParams symbol _ = do

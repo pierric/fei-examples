@@ -92,10 +92,10 @@ main = runFeiM () $ do
         _cfg_context = contextGPU0 })
     optimizer <- makeOptimizer SGD'Mom (Const 0.0002) Nil
 
-    let ce  = CrossEntropy "out" True
+    let ce  = CrossEntropy Nothing True
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
-        acc = Accuracy "out" PredByArgmax 0
+        acc = Accuracy Nothing PredByArgmax 0
                   (\_ p -> p ^?! ix 0)
                   (\b _ -> b ^?! ix "y")
 
@@ -113,13 +113,13 @@ main = runFeiM () $ do
         metric <- newMetric "train" (ce :* acc :* MNil)
         void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
             fitAndEval optimizer (M.fromList [("x", x), ("y", y)]) metric
-            eval <- formatMetric metric
+            eval <- metricFormat metric
             when (i `mod` 100 == 1) $
                 logInfo . display $ sformat (int % "/" % int % ":" % stext) i total eval
 
     metric <- newMetric "val" (acc :* MNil)
     forEachD_i testingData $ \(i, (x, y)) -> askSession $ do
         pred <- forwardOnly (M.singleton "x" x)
-        void $ evalMetric metric (M.singleton "y" y) pred
-    eval <- formatMetric metric
+        void $ metricUpdate metric (M.singleton "y" y) pred
+    eval <- metricFormat metric
     logInfo . display $ sformat ("Validation: " % stext) eval

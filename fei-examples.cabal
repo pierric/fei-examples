@@ -1,13 +1,13 @@
 cabal-version:  2.2
 name:           fei-examples
-version:        0.4.0
+version:        1.0.0
 synopsis:       fei examples
 description:    Various fei examples
 homepage:       https://github.com/pierric/fei-examples#readme
 bug-reports:    https://github.com/pierric/fei-examples/issues
 author:         Jiasen Wu
 maintainer:     jiasenwu@hotmail.com
-copyright:      2019 Jiasen Wu
+copyright:      2020 - Jiasen Wu
 license:        BSD-3-Clause
 license-file:   LICENSE
 category:       Machine Learning, AI

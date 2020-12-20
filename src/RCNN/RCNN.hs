@@ -6,7 +6,7 @@
 module RCNN where
 
 import           Control.Applicative               (ZipList (..))
-import           Control.Lens                      (makePrisms, _1, _2)
+import           Control.Lens                      (_1, _2, makePrisms)
 import           Control.Monad.Trans.Resource
 import qualified Data.Array.Repa                   as Repa
 import           Formatting                        (sformat, string, (%))
@@ -34,6 +34,10 @@ import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
+
+instance Coco.HasDatasetConfig (FeiApp t n Coco.CocoConfig) where
+    type DatasetTag (FeiApp t n Coco.CocoConfig) = "coco"
+    datasetConfig = fa_extra
 
 data CommonArgs = CommonArgs
     { ds_base_path       :: String
