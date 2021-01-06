@@ -126,7 +126,7 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                     C.chunksOf batch_size             .|
                     C.mapM concatBatch
 
-    runFeiM coco_conf $ do
+    runFeiM'nept "jiasen/faster-rcnn" coco_conf $ do
         (_, sym)     <- runLayerBuilder $ graphT rcnn_conf
         fixed_params <- liftIO $ fixedParams backbone TRAIN sym
 
@@ -206,10 +206,14 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                                           , ("rpn_box_masks",   y2)
                                           ]
                  fitAndEval optm binding metric
-                 eval <- metricFormat metric
-                 lr <- use (untag . mod_statistics . stat_last_lr)
 
-                 logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
+                 kv <- metricsToList metric
+                 lift $ mapM_ (uncurry neptLog) kv
+
+                 when (i `mod` 20 == 0) $ do
+                    eval <- metricFormat metric
+                    lr <- use (untag . mod_statistics . stat_last_lr)
+                    logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
              askSession $ saveState (ei == 1)
                  (formatToString ("checkpoints/faster_rcnn_epoch_" % left 3 '0') ei)

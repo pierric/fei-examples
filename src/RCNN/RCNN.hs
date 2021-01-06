@@ -35,6 +35,10 @@ import qualified MXNet.NN.DataIter.Coco            as Coco
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
 
+instance Coco.HasDatasetConfig (FeiApp t n (Extra'Nept Coco.CocoConfig)) where
+    type DatasetTag (FeiApp t n (Extra'Nept Coco.CocoConfig)) = "coco"
+    datasetConfig = fa_extra . _1
+
 instance Coco.HasDatasetConfig (FeiApp t n Coco.CocoConfig) where
     type DatasetTag (FeiApp t n Coco.CocoConfig) = "coco"
     datasetConfig = fa_extra
@@ -249,6 +253,12 @@ default_initializer name = case name of
     "features.fpn.2.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
     "features.fpn.3.conv1.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
     "features.fpn.3.conv2.weight"             -> I.xavier 1 I.XavierUniform I.XavierIn name
+    "mask.mask_head.conv.0.weight"            -> I.xavier 2 I.XavierGaussian I.XavierOut name
+    "mask.mask_head.conv.1.weight"            -> I.xavier 2 I.XavierGaussian I.XavierOut name
+    "mask.mask_head.conv.2.weight"            -> I.xavier 2 I.XavierGaussian I.XavierOut name
+    "mask.mask_head.conv.3.weight"            -> I.xavier 2 I.XavierGaussian I.XavierOut name
+    "mask.mask_head.conv-transposed_weight"   -> I.xavier 2 I.XavierGaussian I.XavierOut name
+    "mask.mask_head.conv-last.weight"         -> I.xavier 2 I.XavierGaussian I.XavierOut name
     _ | T.isSuffixOf ".running_mean" name -> I.zeros name
       | T.isSuffixOf ".running_var"  name -> I.ones name
       | T.isSuffixOf ".beta"         name -> I.zeros name

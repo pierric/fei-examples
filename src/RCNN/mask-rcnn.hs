@@ -66,8 +66,8 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                     C.chunksOf batch_size                  .|
                     C.mapM concatBatch'Mask
 
-    runFeiM coco_conf $ do
-        (_, sym)  <- runLayerBuilder $ graphT rcnn_conf
+    runFeiM'nept "jiasen/mask-rcnn" coco_conf $ do
+        (_, sym)     <- runLayerBuilder $ graphT rcnn_conf
         fixed_params <- liftIO $ fixedParams backbone TRAIN sym
 
         initSession @"mask_rcnn" sym (Config {
@@ -85,15 +85,12 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
             _cfg_fixed_params = fixed_params,
             _cfg_context = contextGPU0 })
 
-        let lr_sched = lrOfFactor (#base := 0.004 .& #factor := 0.5 .& #step := 2000 .& Nil)
-        -- optm <- makeOptimizer SGD'Mom lr_sched (#momentum := 0.9
-        --                                      .& #wd := 0.0001
-        --                                      .& #rescale_grad := 1 / (fromIntegral batch_size)
-        --                                      .& #clip_gradient := 10
-        --                                      .& Nil)
-        optm <- makeOptimizer ADAM lr_sched (#rescale_grad := 1 / (fromIntegral batch_size)
-                                          .& #wd := 0.0001
-                                          .& #clip_gradient := 10 .& Nil)
+        let lr_sched0 = lrOfPoly (#base := 0.01 .& #power := 1 .& #maxnup := 10000 .& Nil)
+            lr_sched  = WarmupScheduler 500 lr_sched0
+        optm <- makeOptimizer SGD'Mom lr_sched (#momentum := 0.9
+                                             .& #wd := 0.0001
+                                             .& #clip_gradient := 10
+                                             .& Nil)
 
         checkpoint <- lastSavedState "checkpoints" "mask_rcnn"
         start_epoch <- case checkpoint of
@@ -107,7 +104,7 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                 let (base, _) = splitExtension filename
                     fn_rev = T.reverse $ T.pack base
                     epoch = P.parseR (P.takeWhile isDigit <* P.takeText) fn_rev
-                    epoch_next = P.parseR P.decimal $ T.reverse epoch
+                    epoch_next = (P.parseR P.decimal $ T.reverse epoch) + 1
                 return epoch_next
         logInfo . display $ sformat ("fixed parameters: " % stext) (tshow (sort $ S.toList fixed_params))
 
@@ -117,16 +114,21 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                                   :* Accuracy (Just "RCNN-acc") PredByArgmax 1
                                         (\_ preds -> preds ^?! ix 3)
                                         (\_ preds -> preds ^?! ix 5)
-                                  :* CrossEntropy (Just "RPN-ce") False
-                                        (\_ preds -> preds ^?! ix 0)
-                                        (\bindings _ -> bindings ^?! ix "rpn_cls_targets")
-                                  :* CrossEntropy (Just "RCNN-ce") True
-                                        (\_ preds -> preds ^?! ix 3)
-                                        (\_ preds -> preds ^?! ix 5)
                                   :* Norm (Just "RPN-L1") 1
                                         (\_ preds -> preds ^?! ix 2)
                                   :* Norm (Just "RCNN-L1") 1
                                         (\_ preds -> preds ^?! ix 4)
+                                  :* Loss (Just "Mask-ce")
+                                        (\preds -> preds ^?! ix 6)
+                                  :* Loss (Just "RPN-cls-loss")
+                                        (\preds -> preds ^?! ix 1)
+                                  :* Loss (Just "RPN-box-loss")
+                                        (\preds -> preds ^?! ix 2)
+                                  :* CrossEntropy (Just "RCNN-cls-loss") True
+                                        (\_ preds -> preds ^?! ix 3)
+                                        (\_ preds -> preds ^?! ix 5)
+                                  :* Loss (Just "RCNN-box-loss")
+                                        (\preds -> preds ^?! ix 4)
                                   :* MNil)
 
         -- update the internal counting of the iterations
@@ -147,9 +149,14 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
                                          , ("rpn_box_masks",   y2)
                                          ]
                 fitAndEval optm binding metric
-                eval <- metricFormat metric
-                lr <- use (untag . mod_statistics . stat_last_lr)
-                logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
+
+                kv <- metricsToList metric
+                lift $ mapM_ (uncurry neptLog) kv
+
+                when (i `mod` 20 == 0) $ do
+                    eval <- metricFormat metric
+                    lr <- use (untag . mod_statistics . stat_last_lr)
+                    logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
             askSession $ saveState (ei == 1)
                 (formatToString ("checkpoints/mask_rcnn_epoch_" % left 3 '0') ei)
