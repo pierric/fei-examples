@@ -26,7 +26,7 @@ default_initializer name shp =
         _ -> I.normal 0.1 name shp
 
 main :: IO ()
-main = runFeiM'nept "jiasen/lenet" () $ do
+main = runFeiM $ WithNept "jiasen/lenet" $ do
     net  <- runLayerBuilder Model.symbol
     initSession @"lenet" net (Config {
         _cfg_data = M.singleton "x" (STensor [batch_size, 1, 28, 28]),
@@ -56,7 +56,7 @@ main = runFeiM'nept "jiasen/lenet" () $ do
                         (\b _ -> b ^?! ix "y")
 
     forM_ (range 5) $ \ind -> do
-        logInfo .display $ sformat ("iteration " % int) ind
+        logInfo . display $ sformat ("iteration " % int) ind
         metrics <- newMetric "train" (ce_metric :* acc_metric :* MNil)
         void $ forEachD_i trainingData $ \(i, (x, y)) -> askSession $ do
             fitAndEval optm (M.fromList [("x", x), ("y", y)]) metrics

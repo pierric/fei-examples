@@ -12,6 +12,7 @@ import qualified RIO.Text                    as T
 import           MXNet.Base                  (ArgOf (..), FShape (..),
                                               HMap (..), contextCPU,
                                               contextGPU0, listArguments, (.&))
+import           MXNet.Base.Tensor
 import           MXNet.NN
 import           MXNet.NN.DataIter.Streaming
 import qualified MXNet.NN.Initializer        as I
@@ -43,7 +44,7 @@ default_initializer name shp
                     _     -> I.normal 0.1 name shp
 
 main :: IO ()
-main = runFeiM () $ do
+main = runFeiM . Simple $ do
     ProgArg model pretrained <- liftIO $ execParser $ info
         (cmdArgParser <**> helper) (fullDesc <> header "CIFAR-10 solver")
 

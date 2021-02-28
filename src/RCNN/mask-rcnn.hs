@@ -50,23 +50,26 @@ main = do
       (RcnnConfigurationTrain{}, _, _)     -> mainTrain args
 
 mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) = do
-    rand_gen  <- liftIO $ newIORef $ mkStdGen 42
-    coco_inst <- Coco.coco ds_base_path "train2017"
+    rand_gen   <- liftIO $ newIORef $ mkStdGen 42
+    train_inst <- Coco.coco ds_base_path "train2017"
+    val_inst   <- Coco.coco ds_base_path "val2017"
 
-    let coco_conf = Coco.CocoConfig coco_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
+    let train_coco_conf = Coco.CocoConfig train_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
+
         -- There is a serious problem with asyncConduit. It made the training loop running
         -- in different threads, which is very bad because the execution of ExecutorForward
         -- has a thread-local state (saving the temporary workspace for cudnn)
         --
         -- data_iter = asyncConduit (Just batch_size) $
         --
-        data_iter = ConduitData (Just batch_size) $
-                    Coco.cocoImagesBBoxesMasks rand_gen    .|
-                    C.mapM (withRpnTargets'Mask rcnn_conf) .|
-                    C.chunksOf batch_size                  .|
-                    C.mapM concatBatch'Mask
+        train_data_iter = ConduitData (Just batch_size) $
+                          Coco.cocoImagesBBoxesMasks rand_gen    .|
+                          C.mapM (withRpnTargets'Mask rcnn_conf) .|
+                          C.chunksOf batch_size                  .|
+                          C.mapM concatBatch'Mask
 
-    runFeiM'nept "jiasen/mask-rcnn" coco_conf $ do
+    runFeiM . WithNept "jiasen/mask-rcnn" $ do
+    -- runFeiM . Simple $ do
         (_, sym)     <- runLayerBuilder $ graphT rcnn_conf
         fixed_params <- liftIO $ fixedParams backbone TRAIN sym
 
@@ -138,25 +141,29 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
 
         forM_ ([start_epoch..pg_train_epochs] :: [Int]) $ \ ei -> do
             logInfo . display $ sformat ("Epoch " % int) ei
-            let slice = takeD pg_train_iter_per_epoch data_iter
-            void $ forEachD_i slice $ \(i, (fn, [x0, x1, x2, x3, y0, y1, y2])) -> askSession $ do
-                let binding = M.fromList [ ("gt_masks",        x0)
-                                         , ("gt_boxes",        x1)
-                                         , ("data",            x2)
-                                         , ("im_info",         x3)
-                                         , ("rpn_cls_targets", y0)
-                                         , ("rpn_box_targets", y1)
-                                         , ("rpn_box_masks",   y2)
-                                         ]
-                fitAndEval optm binding metric
 
-                kv <- metricsToList metric
-                lift $ mapM_ (uncurry neptLog) kv
+            let slice = takeD pg_train_iter_per_epoch train_data_iter
 
-                when (i `mod` 20 == 0) $ do
-                    eval <- metricFormat metric
-                    lr <- use (untag . mod_statistics . stat_last_lr)
-                    logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
+            flip runReaderT train_coco_conf $ do
+                void $ forEachD_pi 32 slice $ \(i, (fn, input)) -> lift . askSession $ do
+                    let [x0, x1, x2, x3, y0, y1, y2] = input
+                        binding = M.fromList [ ("gt_masks",        x0)
+                                             , ("gt_boxes",        x1)
+                                             , ("data",            x2)
+                                             , ("im_info",         x3)
+                                             , ("rpn_cls_targets", y0)
+                                             , ("rpn_box_targets", y1)
+                                             , ("rpn_box_masks",   y2)
+                                             ]
+                    fitAndEval optm binding metric
+
+                    kv <- metricsToList metric
+                    lift $ mapM_ (uncurry neptLog) kv
+
+                    when (i `mod` 20 == 0) $ do
+                        eval <- metricFormat metric
+                        lr <- use (untag . mod_statistics . stat_last_lr)
+                        logInfo . display $ sformat (int % " " % stext % " LR: " % fixed 5) i eval lr
 
             askSession $ saveState (ei == 1)
                 (formatToString ("checkpoints/mask_rcnn_epoch_" % left 3 '0') ei)
