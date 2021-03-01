@@ -8,7 +8,6 @@ module RCNN where
 import           Control.Applicative               (ZipList (..))
 import           Control.Lens                      (_1, _2, makePrisms)
 import           Control.Monad.Trans.Resource
-import qualified Data.Array.Repa                   as Repa
 import           Formatting                        (sformat, string, (%))
 import           Options.Applicative               (Parser, ReadM, auto,
                                                     eitherReader, help, long,
@@ -34,14 +33,6 @@ import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
 import qualified MXNet.NN.Initializer              as I
 import           MXNet.NN.ModelZoo.RCNN.FasterRCNN
-
-instance Coco.HasDatasetConfig (FeiApp t n (Extra'Nept Coco.CocoConfig)) where
-    type DatasetTag (FeiApp t n (Extra'Nept Coco.CocoConfig)) = "coco"
-    datasetConfig = fa_extra . _1
-
-instance Coco.HasDatasetConfig (FeiApp t n Coco.CocoConfig) where
-    type DatasetTag (FeiApp t n Coco.CocoConfig) = "coco"
-    datasetConfig = fa_extra
 
 data CommonArgs = CommonArgs
     { ds_base_path       :: String
@@ -330,37 +321,35 @@ generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
                 -> Coco.ImageInfo
                 -> NonEmpty Int
                 -> Anchor.Configuration
-                -> [Anchor.GTBox Repa.U]
+                -> Coco.GTBoxes
                 -> IO (NDArray Float, NDArray Float, NDArray Float)
 generateTargets feature_net im_info strides anchor_conf gt_boxes = do
     feats  <- runLayerBuilder $ variable "data" >>= feature_net
 
+    [img_height, img_width, _] <- toVector im_info
+    let img_size = floor (max img_height img_width)
+
     -- there should equally number of features and strides, and pair them.
     let feat_stride = RNE.zip feats strides
 
-    layers <- mapM (uncurry make) feat_stride
+    layers <- mapM (make img_size) feat_stride
     let (cls_targets, box_targets, box_masks) = unzip3 $ RNE.toList layers
-    cls_targets <- mapM fromRepa cls_targets
-    box_targets <- mapM fromRepa box_targets
-    box_masks   <- mapM fromRepa box_masks
     cls_targets <- concat_ 0 cls_targets
     box_targets <- concat_ 0 box_targets
     box_masks   <- concat_ 0 box_masks
-    return (cls_targets, box_targets, box_masks)
+    return $ (cls_targets, box_targets, box_masks)
 
   where
-    [img_height, img_width, _] = Repa.toList im_info
-    -- we have padded the image to a square
-    img_size = floor (max img_height img_width)
     base_size = anchor_conf ^. Anchor.conf_anchor_base_size
     scales    = anchor_conf ^. Anchor.conf_anchor_scales
     ratios    = anchor_conf ^. Anchor.conf_anchor_ratios
-    make :: SymbolHandle -> Int -> IO (Anchor.Labels, Anchor.Targets, Anchor.Weights)
-    make feat stride = do
+    make :: Int -> (SymbolHandle, Int) -> IO (Anchor.Labels, Anchor.Targets, Anchor.Weights)
+    make img_size (feat, stride) = do
+        -- we have padded the image to a square
         (_, outputs, _, _) <- inferShape feat [("data", STensor [1,3,img_size,img_size])]
         let [(_, STensor [_, _, h, w])] = outputs
-            anchors = Anchor.anchors (h, w) stride base_size scales ratios
-        runReaderT (Anchor.assign (V.fromList gt_boxes) img_size img_size anchors) anchor_conf
+        anchors <- Anchor.anchors (h, w) stride base_size scales ratios
+        runReaderT (Anchor.assign gt_boxes img_size img_size anchors) anchor_conf
 
 padLength :: DType a => [NDArray a] -> a -> IO [NDArray a]
 padLength arrays value = do
@@ -378,14 +367,13 @@ withRpnTargets :: MonadIO m
                -> (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)
                -> m (String, [NDArray Float])
 withRpnTargets RcnnConfigurationTrain{..} dat = liftIO $ do
+    let (filename, img, info, gt) = dat
+
     (cls_targets, box_targets, box_weights) <-
-        generateTargets extract info (RNE.fromList feature_strides) conf (V.toList gt)
-    imgA  <- fromRepa img
-    infoA <- fromRepa info
-    gtA   <- stack 0 . V.toList =<< mapM fromRepa gt
-    return (filename, [gtA, imgA, infoA, cls_targets, box_targets, box_weights])
+        generateTargets extract info (RNE.fromList feature_strides) conf gt
+
+    return (filename, [gt, img, info, cls_targets, box_targets, box_weights])
     where
-        (filename, img, info, gt) = dat
         conf = Anchor.Configuration
                { Anchor._conf_anchor_scales    = rpn_anchor_scales
                , Anchor._conf_anchor_ratios    = rpn_anchor_ratios
@@ -406,19 +394,7 @@ withRpnTargets'Mask :: MonadIO m
 withRpnTargets'Mask conf dat = do
     let (filename, img, info, gt, msks) = dat
     (_, ret) <- withRpnTargets conf (filename, img, info, gt)
-    liftIO $ do
-        msksA <- stack 0 . V.toList =<< mapM fromRepa msks
-        msksA <- divScalar 255 =<< cast #float32 msksA :: IO (NDArray Float)
-        return (filename, msksA : ret)
-
-toListNDArray :: MonadIO m
-               => (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)
-               -> m (String, [NDArray Float])
-toListNDArray (filename, img, info, gt) = liftIO $ do
-    imgA  <- fromRepa img
-    infoA <- fromRepa info
-    gtA   <- stack 0 . V.toList =<< mapM fromRepa gt
-    return (filename, [gtA, imgA, infoA])
+    return (filename, msks:ret)
 
 concatBatch :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch batch = liftIO $ do

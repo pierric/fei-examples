@@ -80,7 +80,7 @@ default_initializer name shp
     | otherwise = I.normal 0.1 name shp
 
 main :: IO ()
-main = runFeiM () $ do
+main = runFeiM . Simple $ do
     liftIO $ registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- runLayerBuilder symbol
     initSession @"lenet" net (Config {
