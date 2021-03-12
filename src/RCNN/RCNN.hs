@@ -408,25 +408,36 @@ withRpnTargets'Mask conf cached_anchors dat = do
 concatBatch :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch batch = liftIO $ do
     let (filenames, tensors) = unzip batch
-        gt : others = unzipList tensors
+        gt : img : others = unzipList tensors
     -- gt in the batch may not have the same number
     -- must be padded with -1 before stacking
-    gt     <- stack 0 =<< padLength gt (-1)
+    gt  <- stack 0 =<< padLength gt (-1)
+    img_shape  <- ndshape (head img)
+    img_pinned <- makeEmptyNDArray (length img RNE.<| img_shape) contextPinnedCPU
+    S._stack (#num_args := length img .& #data := img .& #axis := 0 .& Nil)
+             (Just [img_pinned])
     -- other tensors can be simply stacked
     others <- mapM (stack 0) others
-    return (filenames, gt : others)
+    return (filenames, gt : img_pinned : others)
 
 
 concatBatch'Mask :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch'Mask batch = liftIO $ do
     let (filenames, tensors) = unzip batch
-        mask_gt : box_gt : others = unzipList tensors
-    mask_gt <- stack 0 =<< padLength mask_gt 0
+        mask_gt : box_gt : img : others = unzipList tensors
+    mask_gt <- stackPinned 0 =<< padLength mask_gt 0
     box_gt  <- stack 0 =<< padLength box_gt (-1)
-    others <- mapM (stack 0) others
-    return (filenames, mask_gt : box_gt : others)
+    img     <- stackPinned 0 img
+    others  <- mapM (stack 0) others
+    return $! (filenames, mask_gt : box_gt : img : others)
 
 unzipList :: [[a]] -> [[a]]
 unzipList = getZipList . traverse ZipList
 
-
+stackPinned :: Int -> [NDArray Float] -> IO (NDArray Float)
+stackPinned a ds = do
+    shape  <- ndshape (head ds)
+    pinned <- makeEmptyNDArray (length ds RNE.<| shape) contextPinnedCPU
+    S._stack (#num_args := length ds .& #data := ds .& #axis := a .& Nil)
+             (Just [pinned])
+    return pinned
