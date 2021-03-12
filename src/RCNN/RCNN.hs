@@ -6,7 +6,8 @@
 module RCNN where
 
 import           Control.Applicative               (ZipList (..))
-import           Control.Lens                      (_1, _2, makePrisms)
+import           Control.Lens                      (_1, _2, ix, makePrisms,
+                                                    (^?))
 import           Control.Monad.Trans.Resource
 import           Formatting                        (sformat, string, (%))
 import           Options.Applicative               (Parser, ReadM, auto,
@@ -19,15 +20,17 @@ import           RIO.Directory                     (canonicalizePath,
                                                     doesFileExist)
 import qualified RIO.HashSet                       as S
 import           RIO.List                          (lastMaybe, unzip, unzip3)
-import           RIO.List.Partial                  (maximum)
+import           RIO.List.Partial                  (head, maximum)
 import qualified RIO.NonEmpty                      as RNE
 import qualified RIO.NonEmpty.Partial              as RNE
 import qualified RIO.Text                          as T
 import qualified RIO.Vector.Boxed                  as V
 
 import           MXNet.Base
+import qualified MXNet.Base.Operators.Tensor       as S
 import           MXNet.Base.ParserUtils            (decimal, endOfInput, list,
                                                     parseOnly, rational)
+import           MXNet.Base.Profiler               as Profiler
 import           MXNet.NN
 import qualified MXNet.NN.DataIter.Anchor          as Anchor
 import qualified MXNet.NN.DataIter.Coco            as Coco
@@ -317,13 +320,15 @@ runApp conf body = do
     runResourceT $ withLogFunc logopt $ \logfunc ->
         flip runReaderT (App logfunc conf) body
 
-generateTargets :: (SymbolHandle -> Layer (NonEmpty SymbolHandle))
+generateTargets :: HasCallStack
+                => (SymbolHandle -> Layer (NonEmpty SymbolHandle))
                 -> Coco.ImageInfo
                 -> NonEmpty Int
                 -> Anchor.Configuration
+                -> HashMap Int Coco.Anchors
                 -> Coco.GTBoxes
                 -> IO (NDArray Float, NDArray Float, NDArray Float)
-generateTargets feature_net im_info strides anchor_conf gt_boxes = do
+generateTargets feature_net im_info strides anchor_conf cached_anchors gt_boxes = do
     feats  <- runLayerBuilder $ variable "data" >>= feature_net
 
     [img_height, img_width, _] <- toVector im_info
@@ -348,7 +353,9 @@ generateTargets feature_net im_info strides anchor_conf gt_boxes = do
         -- we have padded the image to a square
         (_, outputs, _, _) <- inferShape feat [("data", STensor [1,3,img_size,img_size])]
         let [(_, STensor [_, _, h, w])] = outputs
-        anchors <- Anchor.anchors (h, w) stride base_size scales ratios
+        anchors <- case cached_anchors ^? ix stride of
+                     Just a  -> slice a [0, 0] [h, w] >>= reshape [-1,4]
+                     Nothing -> Anchor.anchors (h, w) stride base_size scales ratios
         runReaderT (Anchor.assign gt_boxes img_size img_size anchors) anchor_conf
 
 padLength :: DType a => [NDArray a] -> a -> IO [NDArray a]
@@ -364,13 +371,14 @@ padLength arrays value = do
 
 withRpnTargets :: MonadIO m
                => RcnnConfiguration
+               -> HashMap Int Coco.Anchors
                -> (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes)
                -> m (String, [NDArray Float])
-withRpnTargets RcnnConfigurationTrain{..} dat = liftIO $ do
+withRpnTargets RcnnConfigurationTrain{..} cached_anchors dat = liftIO $ do
     let (filename, img, info, gt) = dat
 
     (cls_targets, box_targets, box_weights) <-
-        generateTargets extract info (RNE.fromList feature_strides) conf gt
+        generateTargets extract info (RNE.fromList feature_strides) conf cached_anchors gt
 
     return (filename, [gt, img, info, cls_targets, box_targets, box_weights])
     where
@@ -389,35 +397,47 @@ withRpnTargets RcnnConfigurationTrain{..} dat = liftIO $ do
 
 withRpnTargets'Mask :: MonadIO m
                     => RcnnConfiguration
+                    -> HashMap Int Coco.Anchors
                     -> (String, Coco.ImageTensor, Coco.ImageInfo, Coco.GTBoxes, Coco.Masks)
                     -> m (String, [NDArray Float])
-withRpnTargets'Mask conf dat = do
+withRpnTargets'Mask conf cached_anchors dat = do
     let (filename, img, info, gt, msks) = dat
-    (_, ret) <- withRpnTargets conf (filename, img, info, gt)
+    (_, ret) <- withRpnTargets conf cached_anchors (filename, img, info, gt)
     return (filename, msks:ret)
 
 concatBatch :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch batch = liftIO $ do
     let (filenames, tensors) = unzip batch
-        gt : others = unzipList tensors
+        gt : img : others = unzipList tensors
     -- gt in the batch may not have the same number
     -- must be padded with -1 before stacking
-    gt     <- stack 0 =<< padLength gt (-1)
+    gt  <- stack 0 =<< padLength gt (-1)
+    img_shape  <- ndshape (head img)
+    img_pinned <- makeEmptyNDArray (length img RNE.<| img_shape) contextPinnedCPU
+    S._stack (#num_args := length img .& #data := img .& #axis := 0 .& Nil)
+             (Just [img_pinned])
     -- other tensors can be simply stacked
     others <- mapM (stack 0) others
-    return (filenames, gt : others)
+    return (filenames, gt : img_pinned : others)
 
 
 concatBatch'Mask :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
 concatBatch'Mask batch = liftIO $ do
     let (filenames, tensors) = unzip batch
-        mask_gt : box_gt : others = unzipList tensors
-    mask_gt <- stack 0 =<< padLength mask_gt 0
+        mask_gt : box_gt : img : others = unzipList tensors
+    mask_gt <- stackPinned 0 =<< padLength mask_gt 0
     box_gt  <- stack 0 =<< padLength box_gt (-1)
-    others <- mapM (stack 0) others
-    return (filenames, mask_gt : box_gt : others)
+    img     <- stackPinned 0 img
+    others  <- mapM (stack 0) others
+    return $! (filenames, mask_gt : box_gt : img : others)
 
 unzipList :: [[a]] -> [[a]]
 unzipList = getZipList . traverse ZipList
 
-
+stackPinned :: Int -> [NDArray Float] -> IO (NDArray Float)
+stackPinned a ds = do
+    shape  <- ndshape (head ds)
+    pinned <- makeEmptyNDArray (length ds RNE.<| shape) contextPinnedCPU
+    S._stack (#num_args := length ds .& #data := ds .& #axis := a .& Nil)
+             (Just [pinned])
+    return pinned
