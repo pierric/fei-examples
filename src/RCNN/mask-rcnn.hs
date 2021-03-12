@@ -54,6 +54,13 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
     train_inst <- Coco.coco ds_base_path "train2017"
     val_inst   <- Coco.coco ds_base_path "val2017"
 
+    cached_anchors <- forM feature_strides $ \stride -> do
+                        let (h, w) = (128, 128)
+                        anchs <- Anchor.anchors (h, w) stride rpn_anchor_base_size rpn_anchor_scales rpn_anchor_ratios
+                        anchs <- reshape [h, w, -1] anchs
+                        return (stride, anchs)
+    cached_anchors <- pure $ M.fromList cached_anchors
+
     let train_coco_conf = Coco.CocoConfig train_inst ds_img_size (toTriple ds_img_pixel_means) (toTriple ds_img_pixel_stds)
 
         -- There is a serious problem with asyncConduit. It made the training loop running
@@ -61,12 +68,12 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
         -- has a thread-local state (saving the temporary workspace for cudnn)
         --
         -- data_iter = asyncConduit (Just batch_size) $
-        --
-        train_data_iter = ConduitData (Just batch_size) $
-                          Coco.cocoImagesBBoxesMasks rand_gen    .|
-                          C.mapM (withRpnTargets'Mask rcnn_conf) .|
-                          C.chunksOf batch_size                  .|
-                          C.mapM concatBatch'Mask
+
+        train_data_iter = ConduitData (Just batch_size)
+                            $  Coco.cocoImagesBBoxesMasks rand_gen
+                            .| C.mapM (withRpnTargets'Mask rcnn_conf cached_anchors)
+                            .| C.chunksOf batch_size
+                            .| C.mapM concatBatch'Mask
 
     runFeiM . WithNept "jiasen/mask-rcnn" $ do
     -- runFeiM . Simple $ do

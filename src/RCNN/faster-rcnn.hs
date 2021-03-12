@@ -57,6 +57,14 @@ main = do
 mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) = do
     rand_gen  <- liftIO $ newIORef $ mkStdGen 19
     coco_inst <- Coco.coco ds_base_path "train2017"
+
+    cached_anchors <- forM feature_strides $ \stride -> do
+                        let (h, w) = (128, 128)
+                        anchs <- Anchor.anchors (h, w) stride rpn_anchor_base_size rpn_anchor_scales rpn_anchor_ratios
+                        anchs <- reshape [h, w, -1] anchs
+                        return (stride, anchs)
+    cached_anchors <- pure $ M.fromList cached_anchors
+
     let coco_conf = Coco.CocoConfig coco_inst ds_img_size
                         (toTriple ds_img_pixel_means)
                         (toTriple ds_img_pixel_stds)
@@ -66,12 +74,12 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
         --
         -- data_iter = asyncConduit (Just batch_size) $
         --
-        data_iter = ConduitData (Just batch_size) $
-                    Coco.cocoImagesBBoxes rand_gen           .|
-                    C.mapM (Coco.augmentWithBBoxes rand_gen) .|
-                    C.mapM (withRpnTargets rcnn_conf) .|
-                    C.chunksOf batch_size             .|
-                    C.mapM concatBatch
+        data_iter = ConduitData (Just batch_size)
+                        $  Coco.cocoImagesBBoxes rand_gen
+                        .| C.mapM (Coco.augmentWithBBoxes rand_gen)
+                        .| C.mapM (withRpnTargets rcnn_conf cached_anchors)
+                        .| C.chunksOf batch_size
+                        .| C.mapM concatBatch
 
     runFeiM . WithNept "jiasen/faster-rcnn" $ do
         (_, sym)     <- runLayerBuilder $ graphT rcnn_conf
