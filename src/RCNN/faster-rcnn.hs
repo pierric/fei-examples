@@ -86,14 +86,11 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
         fixed_params <- liftIO $ fixedParams backbone TRAIN sym
 
         initSession @"faster_rcnn" sym (Config {
-            _cfg_data  = M.fromList [("data",     (STensor [batch_size, 3, ds_img_size, ds_img_size]))
-                                    ,("im_info",  (STensor [batch_size, 3]))
-                                    ,("gt_boxes", (STensor [batch_size, 1, 5]))
+            _cfg_data  = M.fromList [ ("data",            [batch_size, 3, ds_img_size, ds_img_size])
+                                    , ("im_info",         [batch_size, 3])
+                                    , ("gt_boxes",        [batch_size, 1, 5])
                                     ],
-            _cfg_label = ["rpn_cls_targets"
-                         ,"rpn_box_targets"
-                         ,"rpn_box_masks"
-                         ],
+            _cfg_label = [],
             _cfg_initializers = M.empty,
             _cfg_default_initializer = default_initializer,
             _cfg_fixed_params = fixed_params,
@@ -192,8 +189,8 @@ mainInfer (rcnn_conf@RcnnConfigurationInference{..}, CommonArgs{..}, NoExtraArgs
         fixed_params <- return $ S.difference fixed_params (S.fromList ["data", "im_info"])
 
         initSession @"faster_rcnn" sym (Config {
-                _cfg_data  = M.fromList [("data",    (STensor [batch_size, 3, ds_img_size, ds_img_size])),
-                                         ("im_info", (STensor [batch_size, 3]))],
+                _cfg_data  = M.fromList [("data",    [batch_size, 3, ds_img_size, ds_img_size]),
+                                         ("im_info", [batch_size, 3])],
                 _cfg_label = [],
                 _cfg_initializers = M.empty,
                 _cfg_default_initializer = default_initializer,
@@ -223,8 +220,8 @@ mainInfer (rcnn_conf@RcnnConfigurationInference{..}, CommonArgs{..}, NoExtraArgs
                         mean    <- fromVector [1, 1, 1, 3] (VS.fromList ds_img_pixel_means)
                         std     <- fromVector [1, 1, 1, 3] (VS.fromList ds_img_pixel_stds)
                         images  <- rearrange x1 "b c h w -> b h w c" [] >>=
-                                   mulBroadcast std  >>=
-                                   addBroadcast mean >>=
+                                   mul_ std  >>=
+                                   add_ mean >>=
                                    mulScalar 255
                         images  <- VB.fromList <$> splitBySections batch_size 0 True images
                         forM_ (VB.zip6 fn images infos cls_ids scores boxes) renderImageBBoxes

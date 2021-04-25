@@ -32,8 +32,8 @@ instance CustomOperationProp SoftmaxProp where
         -- label: [batch_size]
         -- output: [batch_size, N]
         -- loss: [batch_size]
-        let STensor (batch_size :| _) = data_shape
-            out_shape = STensor (batch_size :| [])
+        let batch_size : _ = data_shape
+            out_shape = batch_size : []
         in ([data_shape, out_shape], [data_shape], [])
     prop_declare_backward_dependency _ grad_out data_in data_out = data_in ++ data_out
 
@@ -52,7 +52,7 @@ instance CustomOperation (Operation SoftmaxProp) where
         void $ copy result in_grad
 
 
-symbol :: Layer SymbolHandle
+symbol :: Layer (Symbol Float)
 symbol = do
     x  <- variable "x"
     y  <- variable "y"
@@ -84,7 +84,7 @@ main = runFeiM . Simple $ do
     liftIO $ registerCustomOperator ("softmax_custom", \_ -> return SoftmaxProp)
     net  <- runLayerBuilder symbol
     initSession @"lenet" net (Config {
-        _cfg_data = M.singleton "x" (STensor [batch_size, 1,28,28]),
+        _cfg_data = M.singleton "x" [batch_size, 1,28,28],
         _cfg_label = ["y"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
