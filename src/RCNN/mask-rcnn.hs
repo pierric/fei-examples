@@ -81,21 +81,18 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
         fixed_params <- liftIO $ fixedParams backbone TRAIN sym
 
         initSession @"mask_rcnn" sym (Config {
-            _cfg_data  = M.fromList [ ("data",     STensor [batch_size, 3, ds_img_size, ds_img_size])
-                                    , ("im_info",  STensor [batch_size, 3])
-                                    , ("gt_boxes", STensor [batch_size, 1, 5])
-                                    , ("gt_masks", STensor [batch_size, 1, ds_img_size, ds_img_size])
+            _cfg_data  = M.fromList [ ("data",     [batch_size, 3, ds_img_size, ds_img_size])
+                                    , ("im_info",  [batch_size, 3])
+                                    , ("gt_boxes", [batch_size, 1, 5])
+                                    , ("gt_masks", [batch_size, 1, ds_img_size, ds_img_size])
                                     ],
-            _cfg_label = ["rpn_cls_targets"
-                         ,"rpn_box_targets"
-                         ,"rpn_box_masks"
-                         ],
+            _cfg_label = [],
             _cfg_initializers = M.empty,
             _cfg_default_initializer = default_initializer,
             _cfg_fixed_params = fixed_params,
             _cfg_context = contextGPU0 })
 
-        let lr_sched0 = lrOfPoly (#base := 0.01 .& #power := 1 .& #maxnup := 10000 .& Nil)
+        let lr_sched0 = lrOfPoly (#base := 0.001 .& #power := 1 .& #maxnup := 10000 .& Nil)
             lr_sched  = WarmupScheduler 500 lr_sched0
         optm <- makeOptimizer SGD'Mom lr_sched (#momentum := 0.9
                                              .& #wd := 0.0001
@@ -152,7 +149,7 @@ mainTrain (rcnn_conf@RcnnConfigurationTrain{..}, CommonArgs{..}, TrainArgs{..}) 
             let slice = takeD pg_train_iter_per_epoch train_data_iter
 
             flip runReaderT train_coco_conf $ do
-                void $ forEachD_pi 32 slice $ \(i, (fn, input)) -> lift . askSession $ do
+                void $ forEachD_i slice $ \(i, (fn, input)) -> lift . askSession $ do
                     let [x0, x1, x2, x3, y0, y1, y2] = input
                         binding = M.fromList [ ("gt_masks",        x0)
                                              , ("gt_boxes",        x1)

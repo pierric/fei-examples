@@ -36,15 +36,18 @@ extra-deps:
 - regex-tdfa-1.3.1.0
 - regex-base-0.94.0.0
 - req-3.8.0
+- type-sets-0.1.1.0
+- cmptype-0.2.0.0
+- magic-tyfams-0.1.1.0
 extra-include-dirs:
-- /home/jiasen/workspace/mxnet/build-1.7.0/include
+- /home/jiasen/workspace/mxnet/build-1.8.0/include
 extra-lib-dirs:
-- /home/jiasen/workspace/mxnet/build-1.7.0
+- /home/jiasen/workspace/mxnet/build-1.8.0
 flags:
     fei-base:
-        mxnet_geq_10700: true
+        mxnet_geq_10800: true
     fei-nn:
-        mxnet_geq_10700: true
+        mxnet_geq_10800: true
         neptune: true
     fei-einops:
         mxnet: true

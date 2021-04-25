@@ -19,17 +19,19 @@ range :: Int -> Vector Int
 range = V.enumFromTo 1
 
 default_initializer :: Initializer Float
-default_initializer name shp =
+default_initializer name arr = do
+    shp <- ndshape arr
     case length shp of
-        1 -> I.zeros name shp
-        2 -> I.xavier 2.0 I.XavierGaussian I.XavierIn name shp
-        _ -> I.normal 0.1 name shp
+        1 -> I.zeros name arr
+        2 -> I.xavier 2.0 I.XavierGaussian I.XavierIn name arr
+        _ -> I.normal 0.1 name arr
 
 main :: IO ()
 main = runFeiM $ WithNept "jiasen/lenet" $ do
+       -- runFeiM $ Simple $ do
     net  <- runLayerBuilder Model.symbol
     initSession @"lenet" net (Config {
-        _cfg_data = M.singleton "x" (STensor [batch_size, 1, 28, 28]),
+        _cfg_data = M.singleton "x" [batch_size, 1, 28, 28],
         _cfg_label = ["y"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,

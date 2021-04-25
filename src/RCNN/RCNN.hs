@@ -1,3 +1,4 @@
+{-# LANGUAGE ExplicitForAll        #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE OverloadedLists       #-}
 {-# LANGUAGE PartialTypeSignatures #-}
@@ -19,7 +20,8 @@ import           RIO
 import           RIO.Directory                     (canonicalizePath,
                                                     doesFileExist)
 import qualified RIO.HashSet                       as S
-import           RIO.List                          (lastMaybe, unzip, unzip3)
+import           RIO.List                          (headMaybe, lastMaybe, unzip,
+                                                    unzip3)
 import           RIO.List.Partial                  (head, maximum)
 import qualified RIO.NonEmpty                      as RNE
 import qualified RIO.NonEmpty.Partial              as RNE
@@ -277,7 +279,7 @@ loadWeights weights_path = do
 data Stage = TRAIN
     | INFERENCE
 
-fixedParams :: Backbone -> Stage -> SymbolHandle -> IO (HashSet Text)
+fixedParams :: DType a => Backbone -> Stage -> (Symbol a) -> IO (HashSet Text)
 fixedParams backbone stage symbol = do
     argnames <- listArguments symbol
     return $ case (stage, backbone) of
@@ -320,8 +322,8 @@ runApp conf body = do
     runResourceT $ withLogFunc logopt $ \logfunc ->
         flip runReaderT (App logfunc conf) body
 
-generateTargets :: HasCallStack
-                => (SymbolHandle -> Layer (NonEmpty SymbolHandle))
+generateTargets :: (HasCallStack, DType a)
+                => (Symbol a -> Layer (NonEmpty (Symbol a)))
                 -> Coco.ImageInfo
                 -> NonEmpty Int
                 -> Anchor.Configuration
@@ -348,11 +350,11 @@ generateTargets feature_net im_info strides anchor_conf cached_anchors gt_boxes 
     base_size = anchor_conf ^. Anchor.conf_anchor_base_size
     scales    = anchor_conf ^. Anchor.conf_anchor_scales
     ratios    = anchor_conf ^. Anchor.conf_anchor_ratios
-    make :: Int -> (SymbolHandle, Int) -> IO (Anchor.Labels, Anchor.Targets, Anchor.Weights)
+    make :: Int -> (Symbol a, Int) -> IO (Anchor.Labels, Anchor.Targets, Anchor.Weights)
     make img_size (feat, stride) = do
         -- we have padded the image to a square
-        (_, outputs, _, _) <- inferShape feat [("data", STensor [1,3,img_size,img_size])]
-        let [(_, STensor [_, _, h, w])] = outputs
+        (_, outputs, _, _) <- inferShape feat [("data", [1,3,img_size,img_size])]
+        let [(_, [_, _, h, w])] = outputs
         anchors <- case cached_anchors ^? ix stride of
                      Just a  -> slice a [0, 0] [h, w] >>= reshape [-1,4]
                      Nothing -> Anchor.anchors (h, w) stride base_size scales ratios
@@ -361,12 +363,18 @@ generateTargets feature_net im_info strides anchor_conf cached_anchors gt_boxes 
 padLength :: DType a => [NDArray a] -> a -> IO [NDArray a]
 padLength arrays value = do
     shps <- mapM ndshape arrays
-    let max_num = maximum $ map RNE.head shps
-    forM (zip arrays shps) $ \(a, n :| shp) ->
+
+    forM_ shps $ \s ->
+        case headMaybe s of
+          Nothing -> throwString "padLength doesn't work with a scalar"
+          _       -> return ()
+
+    let max_num = maximum $ map head shps
+    forM (zip arrays shps) $ \(a, n : shp) ->
         if n == max_num
         then return a
         else do
-            padding <- full value ((max_num - n) :| shp)
+            padding <- full value ((max_num - n) : shp)
             concat_ 0 [a, padding]
 
 withRpnTargets :: MonadIO m
@@ -392,6 +400,9 @@ withRpnTargets RcnnConfigurationTrain{..} cached_anchors dat = liftIO $ do
                , Anchor._conf_bg_overlap       = rpn_bg_overlap
                , Anchor._conf_fg_overlap       = rpn_fg_overlap
                }
+        -- extract is only used to create a subgraph and get the shape of the layers.
+        -- though we set the DType as Float, it is quite arbitrary.
+        extract :: Symbol Float -> Layer (NonEmpty (Symbol Float))
         extract = sequential "features" . features1 backbone
 
 
@@ -405,7 +416,8 @@ withRpnTargets'Mask conf cached_anchors dat = do
     (_, ret) <- withRpnTargets conf cached_anchors (filename, img, info, gt)
     return (filename, msks:ret)
 
-concatBatch :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
+concatBatch :: (MonadIO m, NumericDType a)
+            => [(String, [NDArray a])] -> m ([String], [NDArray a])
 concatBatch batch = liftIO $ do
     let (filenames, tensors) = unzip batch
         gt : img : others = unzipList tensors
@@ -413,7 +425,7 @@ concatBatch batch = liftIO $ do
     -- must be padded with -1 before stacking
     gt  <- stack 0 =<< padLength gt (-1)
     img_shape  <- ndshape (head img)
-    img_pinned <- makeEmptyNDArray (length img RNE.<| img_shape) contextPinnedCPU
+    img_pinned <- makeEmptyNDArray (length img : img_shape) contextPinnedCPU
     S._stack (#num_args := length img .& #data := img .& #axis := 0 .& Nil)
              (Just [img_pinned])
     -- other tensors can be simply stacked
@@ -421,7 +433,8 @@ concatBatch batch = liftIO $ do
     return (filenames, gt : img_pinned : others)
 
 
-concatBatch'Mask :: MonadIO m => [(String, [NDArray Float])] -> m ([String], [NDArray Float])
+concatBatch'Mask :: (MonadIO m, NumericDType a)
+                 => [(String, [NDArray a])] -> m ([String], [NDArray a])
 concatBatch'Mask batch = liftIO $ do
     let (filenames, tensors) = unzip batch
         mask_gt : box_gt : img : others = unzipList tensors
@@ -434,10 +447,10 @@ concatBatch'Mask batch = liftIO $ do
 unzipList :: [[a]] -> [[a]]
 unzipList = getZipList . traverse ZipList
 
-stackPinned :: Int -> [NDArray Float] -> IO (NDArray Float)
+stackPinned :: DType a => Int -> [NDArray a] -> IO (NDArray a)
 stackPinned a ds = do
     shape  <- ndshape (head ds)
-    pinned <- makeEmptyNDArray (length ds RNE.<| shape) contextPinnedCPU
+    pinned <- makeEmptyNDArray (length ds : shape) contextPinnedCPU
     S._stack (#num_args := length ds .& #data := ds .& #axis := a .& Nil)
              (Just [pinned])
     return pinned

@@ -9,9 +9,9 @@ import qualified RIO.HashSet                 as S
 import           RIO.List.Partial            (last)
 import qualified RIO.Text                    as T
 
-import           MXNet.Base                  (ArgOf (..), FShape (..),
-                                              HMap (..), contextCPU,
-                                              contextGPU0, listArguments, (.&))
+import           MXNet.Base                  (ArgOf (..), HMap (..), contextCPU,
+                                              contextGPU0, listArguments,
+                                              ndshape, (.&))
 import           MXNet.Base.Tensor
 import           MXNet.NN
 import           MXNet.NN.DataIter.Streaming
@@ -33,15 +33,17 @@ cmdArgParser = ProgArg
     maybe = maybeReader (Just . Just)
 
 default_initializer :: Initializer Float
-default_initializer name shp
-    | T.isSuffixOf ".bias"  name = I.zeros name shp
-    | T.isSuffixOf ".beta"  name = I.zeros name shp
-    | T.isSuffixOf ".gamma" name = I.ones  name shp
-    | T.isSuffixOf ".running_mean" name = I.zeros name shp
-    | T.isSuffixOf ".running_var"  name = I.ones  name shp
-    | otherwise = case shp of
-                    [_,_] -> I.xavier 2.0 I.XavierGaussian I.XavierIn name shp
-                    _     -> I.normal 0.1 name shp
+default_initializer name arr
+    | T.isSuffixOf ".bias"  name = I.zeros name arr
+    | T.isSuffixOf ".beta"  name = I.zeros name arr
+    | T.isSuffixOf ".gamma" name = I.ones  name arr
+    | T.isSuffixOf ".running_mean" name = I.zeros name arr
+    | T.isSuffixOf ".running_var"  name = I.ones  name arr
+    | otherwise = do
+        shp <- ndshape arr
+        case shp of
+          [_,_] -> I.xavier 2.0 I.XavierGaussian I.XavierIn name arr
+          _     -> I.normal 0.1 name arr
 
 main :: IO ()
 main = runFeiM . Simple $ do
@@ -61,7 +63,7 @@ main = runFeiM . Simple $ do
         Just _  -> fixedParams net model
 
     initSession @"cifar10" net (Config {
-        _cfg_data = M.singleton "x" (STensor [batch_size, 3,32,32]),
+        _cfg_data = M.singleton "x" [batch_size, 3,32,32],
         _cfg_label = ["y"],
         _cfg_initializers = M.empty,
         _cfg_default_initializer = default_initializer,
